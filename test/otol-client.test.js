@@ -68,6 +68,17 @@ function stubFetch(handlers) {
 const client = (fetch, opts = {}) => new OtolClient({ fetch, retryDelayMs: 0, ...opts });
 const routes = { '/tree_of_life/about': ABOUT, '/tree_of_life/subtree': ROOT_SUBTREE };
 
+test('fetch is called detached, like a browser requires (no "Illegal invocation")', async () => {
+  // Browsers throw if native fetch is invoked with `this` set to anything but the window/undefined.
+  // Modules are strict, so `this` here is exactly what the client passed.
+  async function browserLikeFetch(url, init) {
+    if (this !== undefined && this !== globalThis) throw new TypeError("Failed to execute 'fetch': Illegal invocation");
+    return json(ROOT_SUBTREE);
+  }
+  const node = await new OtolClient({ fetch: browserLikeFetch, retries: 0 }).getNode('ott93302');
+  assert.equal(node.name, 'cellular organisms');
+});
+
 // --- id handling ---
 
 test('normalizeNodeId accepts ott ids, mrca ids and numbers; rejects junk', () => {

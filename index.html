@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Tree of Life</title>
+  <meta name="description" content="An interactive, infinitely zoomable Tree of Life, loaded lazily from the Open Tree of Life API.">
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg-0: #050912;
+      --bg-1: #0d1a30;
+      --ink: #e8f0ff;
+      --muted: #93a3c4;
+      --panel: rgba(12, 20, 36, 0.88);
+      --line: rgba(150, 175, 220, 0.22);
+      --accent: #ffd166;
+      --danger: #ff8a8a;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      background: radial-gradient(120% 90% at 30% 40%, var(--bg-1), var(--bg-0));
+      color: var(--ink);
+      font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      overflow: hidden;
+    }
+    #tree { position: fixed; inset: 0; width: 100%; height: 100%; display: block; outline: none; cursor: grab; }
+
+    .brand { position: fixed; top: 16px; left: 16px; pointer-events: none; }
+    .brand h1 { margin: 0; font-size: 18px; font-weight: 650; letter-spacing: 0.01em; }
+    .brand p { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
+
+    .hud {
+      position: fixed; left: 16px; right: 16px; bottom: 14px;
+      display: flex; gap: 12px; align-items: flex-end; justify-content: space-between;
+      pointer-events: none; font-size: 12px; color: var(--muted);
+    }
+    .hud b { color: var(--ink); font-weight: 600; }
+    .hud .hint { text-align: right; max-width: 34ch; }
+    #loading::before {
+      content: ""; display: inline-block; width: 9px; height: 9px; margin-right: 6px; vertical-align: -1px;
+      border: 2px solid #9ad1ff; border-right-color: transparent; border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    button {
+      font: inherit; color: var(--ink); background: rgba(255, 255, 255, 0.07);
+      border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; cursor: pointer;
+    }
+    button:hover { background: rgba(255, 255, 255, 0.14); }
+    button:focus-visible, #tree:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    button.primary { background: var(--accent); color: #1b1500; border-color: transparent; font-weight: 600; }
+    button.primary:hover { background: #ffdc8a; }
+    #reset { position: fixed; top: 14px; right: 16px; }
+
+    #detail {
+      position: fixed; top: 60px; right: 16px; width: min(320px, calc(100vw - 32px));
+      background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px;
+      backdrop-filter: blur(10px); box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+    }
+    #detail[hidden], #tip[hidden], #fatal[hidden] { display: none; }
+    #detail h2 { margin: 0 28px 2px 0; font-size: 18px; line-height: 1.25; overflow-wrap: anywhere; }
+    #detail .sub { margin: 0 0 12px; color: var(--muted); font-size: 12px; }
+    #detail dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; margin: 0 0 14px; }
+    #detail dt { color: var(--muted); }
+    #detail dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+    #detail .actions { display: flex; gap: 8px; }
+    #close { position: absolute; top: 8px; right: 8px; padding: 2px 9px; font-size: 18px; line-height: 1.2; }
+
+    #tip {
+      position: fixed; z-index: 2; pointer-events: none; max-width: 260px;
+      background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px;
+      font-size: 12px; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+    }
+    #tip b { display: block; font-size: 13px; }
+    #tip span { color: var(--muted); }
+
+    #fatal {
+      position: fixed; inset: 0; display: grid; place-content: center; justify-items: center; gap: 12px;
+      text-align: center; padding: 24px; background: rgba(5, 9, 18, 0.85);
+    }
+    #fatal p { margin: 0; max-width: 46ch; }
+    #fatal .err { color: var(--danger); font-size: 12px; }
+
+    @media (max-width: 560px) {
+      .hud .hint { display: none; }
+      #detail { top: auto; bottom: 48px; right: 16px; left: 16px; width: auto; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      #loading::before { animation: none; }
+    }
+  </style>
+</head>
+<body>
+  <canvas id="tree" tabindex="0" role="img"
+    aria-label="Interactive Tree of Life. Drag to pan, scroll or pinch to zoom, click a branch for details. Arrow keys pan, plus and minus zoom."></canvas>
+
+  <header class="brand">
+    <h1>Tree of Life</h1>
+    <p id="release">Open Tree of Life synthetic tree</p>
+  </header>
+  <button id="reset" type="button" title="Back to the whole tree (0)">Reset view</button>
+
+  <footer class="hud" aria-live="polite">
+    <div>
+      <div>Viewing <b id="focus">…</b></div>
+      <div><span id="loading" hidden></span><span id="count"></span></div>
+    </div>
+    <div class="hint">Drag to pan · scroll or pinch to zoom · click a node for details</div>
+  </footer>
+
+  <aside id="detail" role="dialog" aria-labelledby="d-name" hidden>
+    <button id="close" type="button" aria-label="Close details">×</button>
+    <h2 id="d-name"></h2>
+    <p class="sub" id="d-sub"></p>
+    <dl>
+      <dt>OTT ID</dt><dd id="d-ott"></dd>
+      <dt>Rank</dt><dd id="d-rank"></dd>
+      <dt>Descendant tips</dt><dd id="d-tips"></dd>
+      <dt>Child branches</dt><dd id="d-children"></dd>
+    </dl>
+    <div class="actions"><button class="primary" id="d-zoom" type="button">Zoom to this branch</button></div>
+  </aside>
+
+  <div id="tip" hidden><b></b><span></span></div>
+
+  <div id="fatal" role="alert" hidden>
+    <p><b>Couldn't load the Tree of Life.</b></p>
+    <p class="err" id="fatal-msg"></p>
+    <button class="primary" id="retry" type="button">Try again</button>
+  </div>
+
+  <noscript><p style="position:fixed;top:80px;left:16px">This visualization needs JavaScript.</p></noscript>
+
+  <script type="module">
+    import { OtolClient } from './src/otol-client.js';
+    import { TreeRenderer } from './src/canvas-renderer.js';
+
+    const $ = (id) => document.getElementById(id);
+    const fmt = new Intl.NumberFormat();
+    const client = new OtolClient();
+
+    const detail = $('detail');
+    const tip = $('tip');
+    let shownId = null;
+
+    function showDetail(info) {
+      if (!info) { shownId = null; detail.hidden = true; return; }
+      shownId = info.id;
+      $('d-name').textContent = info.name;
+      $('d-sub').textContent = info.named ? info.id : 'Unnamed clade (no taxon name in the taxonomy)';
+      $('d-ott').textContent = info.ottId ?? '—';
+      $('d-rank').textContent = info.rank;
+      $('d-tips').textContent = fmt.format(info.numTips);
+      $('d-children').textContent =
+        info.childrenCount !== null ? fmt.format(info.childrenCount)
+        : info.loading ? 'loading…'
+        : 'zoom in to load';
+      detail.hidden = false;
+    }
+
+    function showTip(info, x, y) {
+      if (!info) { tip.hidden = true; return; }
+      tip.firstElementChild.textContent = info.name;
+      tip.lastElementChild.textContent = `${info.rank} · ${fmt.format(info.numTips)} tips`;
+      tip.hidden = false;
+      const pad = 14;
+      const w = tip.offsetWidth;
+      const h = tip.offsetHeight;
+      tip.style.left = `${Math.min(x + pad, innerWidth - w - 8)}px`;
+      tip.style.top = `${y + pad + h > innerHeight ? y - pad - h : y + pad}px`;
+    }
+
+    const renderer = new TreeRenderer($('tree'), {
+      client,
+      onSelect: showDetail,
+      onHover: showTip,
+      onStatus({ loading, nodes, focus }) {
+        $('focus').textContent = focus.name;
+        $('loading').hidden = loading === 0;
+        $('count').textContent = loading ? `loading ${loading} branch${loading === 1 ? '' : 'es'} · ` : '';
+        $('count').textContent += `${fmt.format(nodes)} nodes loaded`;
+      },
+    });
+
+    $('reset').addEventListener('click', () => renderer.resetView());
+    $('close').addEventListener('click', () => { renderer.clearSelection(); showDetail(null); });
+    $('d-zoom').addEventListener('click', () => shownId && renderer.zoomTo(shownId));
+    addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !detail.hidden) { renderer.clearSelection(); showDetail(null); }
+    });
+
+    async function boot() {
+      $('fatal').hidden = true;
+      try {
+        await renderer.start();
+        const info = await client.getTreeInfo();
+        $('release').textContent = `Open Tree of Life · synthetic tree ${info.synthId} · taxonomy ${info.taxonomyVersion}`;
+        $('tree').focus({ preventScroll: true });
+      } catch (err) {
+        $('fatal-msg').textContent = err?.message ?? String(err);
+        $('fatal').hidden = false;
+      }
+    }
+    $('retry').addEventListener('click', boot);
+    boot();
+
+    window.tree = renderer; // handy for poking around in the console
+  </script>
+</body>
+</html>

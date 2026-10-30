@@ -9,6 +9,7 @@
     "node": ">=18"
   },
   "scripts": {
+    "start": "node scripts/serve.js",
     "test": "node --test \"test/*.test.js\"",
     "example": "node examples/explore.js"
   },

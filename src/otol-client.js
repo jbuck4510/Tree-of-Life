@@ -174,7 +174,9 @@ export class OtolClient {
       throw new TypeError('No fetch implementation available; pass options.fetch');
     }
     this.#baseUrl = baseUrl.replace(/\/+$/, '');
-    this.#fetch = fetchImpl;
+    // Not `this.#fetch = fetchImpl`: calling the browser's native fetch as a method of another
+    // object throws "Illegal invocation". The wrapper calls it detached, as fetch(...) expects.
+    this.#fetch = (url, init) => fetchImpl(url, init);
     this.#timeoutMs = timeoutMs;
     this.#retries = retries;
     this.#retryDelayMs = retryDelayMs;
