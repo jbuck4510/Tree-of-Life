@@ -1,0 +1,18 @@
+{
+ "type": "standard",
+ "title": "Eukaryote",
+ "displaytitle": "<span lang=\"en\" dir=\"ltr\"><span class=\"mw-page-title-main\">Eukaryote</span></span>",
+ "description": "Domain of life whose cells have nuclei",
+ "extract": "The eukaryotes are cellular organisms of the domain Eukaryota or Eukarya, which have a distinct cell nucleus, membrane-bound organelles and organization supported by a cytoskeleton.",
+ "thumbnail": {
+  "source": "https://thumb.wikimedia.org/wikipedia/commons/thumb/c/ce/Rhodomonas_salina_CCMP_322_%28cropped%29.jpg/330px-Rhodomonas_salina_CCMP_322_%28cropped%29.jpg?utm_source=en.wikipedia.org&utm_campaign=api&utm_content=thumbnail",
+  "width": 330,
+  "height": 211
+ },
+ "content_urls": {
+  "desktop": {
+   "page": "https://en.wikipedia.org/wiki/Eukaryote"
+  }
+ },
+ "wikibase_item": "Q19088"
+}

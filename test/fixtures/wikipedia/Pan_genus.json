@@ -1,0 +1,18 @@
+{
+ "type": "standard",
+ "title": "Pan (genus)",
+ "displaytitle": "<i>Pan</i> (genus)",
+ "description": "Genus of African great ape",
+ "extract": "The genus Pan consists of two extant species: the bonobo and the chimpanzee.",
+ "thumbnail": {
+  "source": "https://thumb.wikimedia.org/wikipedia/commons/thumb/3/3f/Composite_image_of_male_chimpanzee_%28left%29_and_male_bonobo_%28right%29.jpg/330px-Composite_image_of_male_chimpanzee_%28left%29_and_male_bonobo_%28right%29.jpg?utm_source=en.wikipedia.org&utm_campaign=api&utm_content=thumbnail",
+  "width": 330,
+  "height": 169
+ },
+ "content_urls": {
+  "desktop": {
+   "page": "https://en.wikipedia.org/wiki/Pan_(genus)"
+  }
+ },
+ "wikibase_item": "Q80174"
+}

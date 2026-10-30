@@ -12,13 +12,17 @@ npm run example  # live walkthrough of the API client in the terminal
 Drag to pan, scroll or pinch to zoom (arrow keys and +/- also work, `0` resets), hover for a tooltip
 and click a node for its details. Branches load as you zoom into them. Press `/` (or click the box
 at the top) to search: pick a species or group and the tree opens every level down to it and the
-camera flies there.
+camera flies there. Selecting a node (by click or search) slides out a details sidebar, and the
+address bar becomes a link to it.
 
 | File                      | What it is                                                       |
 | ------------------------- | ---------------------------------------------------------------- |
-| `index.html`              | page, detail overlay, tooltip, status line                       |
+| `index.html`              | page, details sidebar, tooltip, status line                      |
 | `src/canvas-renderer.js`  | `TreeRenderer`: layout, camera, zoom-driven loading, drawing     |
 | `src/search-box.js`       | `SearchBox`: debounced autocomplete combobox for the search field |
+| `src/sidebar.js`          | `TaxonSidebar`: the slide-out details panel                      |
+| `src/taxon-info.js`       | `TaxonInfoClient`: Wikipedia extract/thumbnail and GBIF names    |
+| `src/share-link.js`       | URL-hash deep links, copy/share                                   |
 | `src/otol-client.js`      | `OtolClient`: cached, retrying API client (below)                |
 
 ## Renderer
@@ -36,6 +40,8 @@ const renderer = new TreeRenderer(canvas, {
 await renderer.start();            // rejects if the root can't be loaded; safe to call again
 renderer.zoomTo(info.id);          // fly to a node you already have
 renderer.goTo(lineage.path, { signal, as: lineage.alias });  // reveal a path, fly to its end (see Search)
+renderer.setInsets({ right: 380 }); // page UI covers the right 380px: flights centre in the rest
+renderer.lineageOf(id); renderer.pathTo(id);                 // ancestors / root-first ids of a loaded node
 renderer.resetView();
 ```
 
@@ -77,13 +83,44 @@ for the root-to-target path, then `renderer.goTo(path)`:
 2. the camera flies in a straight line at constant zoom speed, from the whole tree to the node. The
    same focus re-basing that makes manual zoom precise carries it through, whether the target is 10x or
    10^30x smaller than the screen; the last frame is set exactly;
-3. the target is ringed and its details open on arrival. Grabbing the canvas, scrolling, or starting
-   another search takes over from a flight in progress.
+3. the target is ringed and the sidebar opens as the flight starts, so its article is usually loaded by
+   the time the camera lands. Grabbing the canvas, scrolling, or starting another search takes over
+   from a flight in progress.
 
 Two quirks of the synthetic tree are handled: hybrids, environmental samples and paraphyletic groups
 (Reptilia, Protista) were *pruned* from it, so the search flies to the closest ancestor that is in the
 tree and says so; and many ordinary taxa (*Escherichia coli*, *Canis*, *Quercus*) have no node of their
 own but are an unnamed MRCA node, which then takes the taxon's name and rank (`alias`).
+
+### Details sidebar and deep links
+
+Clicking a node, or arriving at one, opens the sidebar (a bottom sheet on phones; the top bar and
+the flight targets make room for it via `renderer.setInsets`):
+
+- **Header:** rank, scientific name (italic from genus down), common name, and Wikipedia's one-line
+  description.
+- **About:** the article's extract, its thumbnail, and links to Wikipedia (CC BY-SA) and GBIF.
+- **Details:** OTT id, descendant tips, child branches.
+- **Taxonomic path:** every named ancestor back to the root, each one clickable (it flies there);
+  unnamed clades are hidden behind a toggle.
+- **Actions:** "Zoom to this branch" and a share button.
+
+`TaxonInfoClient.lookup({ name, rank })` asks the Wikipedia REST summary API (extract, thumbnail,
+description) and GBIF (common name, species link) in parallel. Scientific names collide with ordinary
+pages (*Pan* is a god; *Mus* a disambiguation) and are often redirects (*Homo sapiens* is "Human"), so a
+page is accepted only if Wikipedia's own description calls it a taxon (a redirect from the exact name
+counts; otherwise the text must name it). It tries `Name`, then `Name (rank)`, then for a subspecies its
+species, and says when it did. GBIF's matcher is fuzzy (*Pan* matches the phylum Chordata), so a GBIF
+match counts only if its canonical name is the name asked for. 429s and 5xx are retried once
+(honouring `Retry-After`) and then shown as "Wikipedia isn't responding" with a retry button, never
+as "no article"; only definitive answers are cached. Everything from the network goes into the page
+as text, and links and images must be `https:`.
+
+The URL hash is the share link. Selecting a node writes `#ott770315` with `history.replaceState` (no
+history spam), closing clears it, and loading or editing a hash opens that node the way a search
+would, including the pruned-taxon fallback. A taxon with no node of its own (*Escherichia coli*)
+uses its taxon id, so the link keeps its name. The button copies the link, or opens the system share
+sheet on touch devices.
 
 ## API client
 

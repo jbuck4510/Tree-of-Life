@@ -278,6 +278,7 @@ export class TreeRenderer {
     this.width = 1;
     this.height = 1;
     this.dpr = 1;
+    this.insets = { left: 0, right: 0, top: 0, bottom: 0 }; // screen edges covered by page UI
 
     this.hovered = null;
     this.selected = null;
@@ -357,7 +358,36 @@ export class TreeRenderer {
       expanded: n.expanded,
       loading: n.loading,
       error: n.error,
+      color: n.color,
     };
+  }
+
+  /** Ancestors of a node, root first and not including it, as plain data (for a breadcrumb or path list). */
+  lineageOf(id) {
+    const out = [];
+    for (let a = this._byId.get(id)?.parent; a; a = a.parent) {
+      out.push({ id: a.data.id, name: a.data.name, rank: a.data.rank, named: a.data.named, ottId: a.data.ottId });
+    }
+    return out.reverse();
+  }
+
+  /** Root-first ids down to a node that is in the tree; what goTo() takes. Empty if unknown. */
+  pathTo(id) {
+    const n = this._byId.get(id);
+    if (!n) return [];
+    const ids = [];
+    for (let a = n; a; a = a.parent) ids.push(a.data.id);
+    return ids.reverse();
+  }
+
+  /**
+   * Tells the renderer which edges of the canvas are covered by page UI (a sidebar, a
+   * bottom sheet). Flights and "reset view" then centre things in what is left. The view
+   * itself doesn't move.
+   */
+  setInsets({ left = 0, right = 0, top = 0, bottom = 0 } = {}) {
+    this.insets = { left, right, top, bottom };
+    if (this.root) this.fitK = this._fit(0.6, 0.4).k;
   }
 
   get stats() {
@@ -404,8 +434,7 @@ export class TreeRenderer {
     if (!n) return false;
     this._endFly(false);
     const from = this._screenTransform(n);
-    const k = Math.min(this.width / (BOX.x1 - BOX.x0 + 0.5), this.height / (2 * BOX.y + 0.3));
-    const to = { k, x: this.width / 2 - (k * (BOX.x0 + BOX.x1)) / 2, y: this.height / 2 };
+    const to = this._fit(0.5, 0.3);
     const rho = to.k / from.k;
     this._vel = { x: 0, y: 0 };
     this._zoomPending = 0;
@@ -436,8 +465,8 @@ export class TreeRenderer {
    * each a child of the one before (what OtolClient.getLineage returns). Every level
    * that isn't loaded yet is fetched (a few in parallel, since the whole path is
    * known up front), attached in order, and the target is selected.
-   * Whatever was selected is deselected straight away; the target's details are
-   * reported through onSelect when the flight ends.
+   * Whatever was selected is deselected straight away, and the target is reported through
+   * onSelect as the flight starts (so a panel can open, and set insets, in time to be flown around).
    * Resolves true once the camera arrives, false if the user takes over first.
    * Rejects if a level can't be loaded, or with the signal's reason if it aborts.
    * @param {string[]} path
@@ -478,11 +507,10 @@ export class TreeRenderer {
     const target = this._byId.get(path.at(-1));
     if (as && !target.data.named) target.adopt(as);
     this.selected = target; // ringed as soon as it comes into view
+    this.onSelect?.(this.describe(target));
     onFlightStart?.();
     this.zoomTo(target.data.id);
-    const arrived = this._fly ? await this._fly.done : true;
-    if (this.selected === target) this.onSelect?.(this.describe(target)); // not if a newer search took over
-    return arrived;
+    return this._fly ? this._fly.done : true;
   }
 
   _endFly(arrived) {
@@ -491,10 +519,19 @@ export class TreeRenderer {
     fly?.resolve?.(arrived);
   }
 
+  /** Scale and origin that centre a unit-height frame in the area the insets leave free. */
+  _fit(padX, padY) {
+    const { left, right, top, bottom } = this.insets;
+    const w = Math.max(1, this.width - left - right);
+    const h = Math.max(1, this.height - top - bottom);
+    const k = Math.min(w / (BOX.x1 - BOX.x0 + padX), h / (2 * BOX.y + padY));
+    return { k, x: left + w / 2 - (k * (BOX.x0 + BOX.x1)) / 2, y: top + h / 2 };
+  }
+
   _fitRoot() {
-    const k = Math.min(this.width / (BOX.x1 - BOX.x0 + 0.6), this.height / (2 * BOX.y + 0.4));
+    const { k, x, y } = this._fit(0.6, 0.4);
     this.fitK = k;
-    this.view = { x: this.width / 2 - (k * (BOX.x0 + BOX.x1)) / 2, y: this.height / 2, k };
+    this.view = { x, y, k };
     this._dirty = true;
   }
 
@@ -1027,7 +1064,7 @@ export class TreeRenderer {
     if (this.root) {
       this.view.x += (this.width - w0) / 2; // keep what was in the middle in the middle
       this.view.y += (this.height - h0) / 2;
-      this.fitK = Math.min(this.width / (BOX.x1 - BOX.x0 + 0.6), this.height / (2 * BOX.y + 0.4));
+      this.fitK = this._fit(0.6, 0.4).k;
     }
     this._dirty = true;
   }

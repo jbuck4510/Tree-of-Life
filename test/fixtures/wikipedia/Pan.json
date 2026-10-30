@@ -1,0 +1,13 @@
+{
+ "type": "disambiguation",
+ "title": "Pan",
+ "displaytitle": "<span lang=\"en\" dir=\"ltr\"><span class=\"mw-page-title-main\">Pan</span></span>",
+ "description": "Topics referred to by the same term",
+ "extract": "Pan or PAN may refer to:",
+ "content_urls": {
+  "desktop": {
+   "page": "https://en.wikipedia.org/wiki/Pan"
+  }
+ },
+ "wikibase_item": "Q5384111"
+}

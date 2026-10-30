@@ -340,22 +340,54 @@ async function searchRenderer(depth, opts) {
   return { r, client, path, events };
 }
 
-test('goTo hides the old details at once, reports the flight start, and shows the target only on arrival', async () => {
+test('goTo hides the old details at once, then reports the target as the flight starts', async () => {
   const { r, path, events } = await searchRenderer(10, { delay: 2 });
   r.selected = r.root; // something was selected before searching
   const log = [];
-  const p = r.goTo(path, { onFlightStart: () => log.push(['flight', r._fly === null]) });
+  const p = r.goTo(path, { onFlightStart: () => log.push(['flight', r._fly === null, events.selected.at(-1)?.id]) });
   assert.equal(events.selected.at(-1), null, 'old details dismissed synchronously');
   assert.equal(r.selected, null);
   const before = events.selected.length;
   await drive(r, p, { until: () => log.length > 0 });
-  assert.deepEqual(log, [['flight', true]], 'called just before the camera sets off');
-  assert.equal(events.selected.length, before, 'no details shown while travelling');
-  assert.ok(r.selected === r._byId.get('n10'), 'but the target is already marked');
+  assert.deepEqual(log, [['flight', true, 'n10']], 'the target is announced just before the camera sets off');
+  assert.equal(events.selected.length, before + 1, 'exactly once');
+  assert.ok(r.selected === r._byId.get('n10'));
   const { v } = await drive(r, p);
   assert.equal(v, true);
-  assert.equal(events.selected.at(-1).id, 'n10', 'details arrive with the camera');
-  assert.equal(events.selected.length, before + 1);
+  assert.equal(events.selected.length, before + 1, 'and not again on arrival');
+});
+
+test('lineageOf and pathTo describe the way back to the root', async () => {
+  const { r, path } = await searchRenderer(6);
+  await drive(r, r.goTo(path));
+  assert.deepEqual(r.pathTo('n6'), path);
+  assert.deepEqual(r.lineageOf('n6').map((a) => a.id), path.slice(0, -1));
+  assert.deepEqual(r.lineageOf('n0'), []);
+  assert.deepEqual(r.lineageOf('nope'), []);
+  assert.deepEqual(r.pathTo('nope'), []);
+  assert.deepEqual(Object.keys(r.lineageOf('n3')[0]).sort(), ['id', 'name', 'ottId', 'named', 'rank'].sort());
+  assert.match(r.describe(r._byId.get('n6')).color, /^hsl\(/);
+});
+
+test('insets make flights and reset centre things in the space the page leaves free', async () => {
+  const { r, path } = await searchRenderer(6);
+  r.setInsets({ right: 380, top: 56 });
+  await drive(r, r.goTo(path));
+  const s = r._screenTransform(r._byId.get('n6'));
+  const freeW = W - 380;
+  const freeH = H - 56;
+  assert.ok(near(s.x + 0.9 * s.k, freeW / 2, 1e-9), `box centre x=${s.x + 0.9 * s.k}, free area centre ${freeW / 2}`);
+  assert.ok(near(s.y, 56 + freeH / 2, 1e-9));
+  assert.ok(s.k <= freeW / 2.7 + 1e-6, 'and it fits inside it');
+
+  r.resetView();
+  r.tick(0);
+  const root = r._screenTransform(r.root);
+  assert.ok(near(root.x + 0.9 * root.k, freeW / 2, 1e-6));
+  r.setInsets({});
+  r.resetView();
+  const full = r._screenTransform(r.root);
+  assert.ok(near(full.x + 0.9 * full.k, W / 2, 1e-6) && near(full.y, H / 2, 1e-6), 'cleared insets restore the full-screen fit');
 });
 
 test('goTo expands every ancestor, selects the target and flies the camera to it', async () => {

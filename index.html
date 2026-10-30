@@ -104,19 +104,93 @@
     button.primary { background: var(--accent); color: #1b1500; border-color: transparent; font-weight: 600; }
     button.primary:hover { background: #ffdc8a; }
 
-    #detail {
-      position: fixed; top: 124px; right: 16px; width: min(320px, calc(100vw - 32px));
-      background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px;
-      backdrop-filter: blur(10px); box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+    #tip[hidden], #fatal[hidden] { display: none; }
+
+    /* ---- details sidebar (a bottom sheet on phones) ---- */
+    :root { --sb-w: 380px; }
+    .sidebar {
+      position: fixed; z-index: 2; top: 0; right: 0; bottom: 0; width: var(--sb-w); display: flex; flex-direction: column;
+      background: rgba(10, 17, 31, 0.96); border-left: 1px solid var(--line); backdrop-filter: blur(14px);
+      box-shadow: -16px 0 48px rgba(0, 0, 0, 0.45);
+      --clade: var(--accent);
+      transform: translateX(100%); visibility: hidden;
+      transition: transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1), visibility 0s 0.3s;
     }
-    #detail[hidden], #tip[hidden], #fatal[hidden] { display: none; }
-    #detail h2 { margin: 0 28px 2px 0; font-size: 18px; line-height: 1.25; overflow-wrap: anywhere; }
-    #detail .sub { margin: 0 0 12px; color: var(--muted); font-size: 12px; }
-    #detail dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; margin: 0 0 14px; }
-    #detail dt { color: var(--muted); }
-    #detail dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
-    #detail .actions { display: flex; gap: 8px; }
-    #close { position: absolute; top: 8px; right: 8px; padding: 2px 9px; font-size: 18px; line-height: 1.2; }
+    .sidebar.open { transform: none; visibility: visible; transition: transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1), visibility 0s; }
+    .sb-close {
+      position: absolute; top: 10px; right: 10px; z-index: 1; width: 32px; height: 32px; padding: 0; border-radius: 50%;
+      font-size: 20px; line-height: 1; background: rgba(8, 13, 24, 0.7); backdrop-filter: blur(6px);
+    }
+    .sb-scroll { flex: 1 1 auto; overflow-y: auto; overscroll-behavior: contain; }
+    .sb-band { height: 4px; background: var(--clade); }
+    .sb-hero { position: relative; margin: 0; height: 210px; background: #0a1020; }
+    .sb-hero[hidden] { display: none; }
+    .sb-hero img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: center 25%; }
+    .sb-hero figcaption {
+      position: absolute; right: 8px; bottom: 8px; font-size: 11px; padding: 2px 9px; border-radius: 999px;
+      background: rgba(5, 9, 18, 0.7); backdrop-filter: blur(4px);
+    }
+    .sb-hero figcaption a { color: #dbe6ff; }
+    .sb-head { padding: 16px 20px 2px; }
+    .sb-rank {
+      display: flex; align-items: center; gap: 8px; margin: 0 0 6px; text-transform: uppercase; letter-spacing: 0.08em;
+      font-size: 11px; color: var(--muted);
+    }
+    .sb-rank .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--clade); }
+    .sb-head h2 { margin: 0 36px 0 0; font-size: 24px; line-height: 1.15; overflow-wrap: anywhere; }
+    .italic { font-style: italic; }
+    .sb-common { margin: 4px 0 0; font-size: 15px; }
+    .sb-tagline { margin: 2px 0 0; font-size: 13px; color: var(--muted); }
+    .sb-section { padding: 14px 20px 4px; }
+    .sb-section h3 { margin: 0 0 8px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+    .sb-extract { margin: 0 0 8px; font-size: 14px; line-height: 1.55; }
+    .sb-msg { margin: 0 0 8px; font-size: 13px; color: var(--muted); }
+    .sb-sources { margin: 6px 0 4px; font-size: 12px; color: var(--muted); }
+    .sidebar a { color: var(--accent); }
+    .sb-section [hidden], .sb-actions [hidden] { display: none; }
+    .skeleton i {
+      display: block; height: 11px; margin: 0 0 9px; border-radius: 6px; background-size: 200% 100%;
+      background-image: linear-gradient(90deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.15), rgba(255, 255, 255, 0.06));
+      animation: shimmer 1.3s linear infinite;
+    }
+    .skeleton i:nth-child(2) { width: 92%; }
+    .skeleton i:nth-child(3) { width: 68%; }
+    @keyframes shimmer { to { background-position: -200% 0; } }
+    .sb-facts { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; margin: 0; font-size: 13px; }
+    .sb-facts dt { color: var(--muted); }
+    .sb-facts dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+    .sb-path {
+      position: relative; list-style: none; margin: 0 0 4px 5px; padding: 2px 0 2px 14px; max-height: 290px; overflow-y: auto;
+      border-left: 2px solid var(--line);
+    }
+    .sb-path li { position: relative; }
+    .sb-path li::before {
+      content: ""; position: absolute; left: -20px; top: 50%; width: 8px; height: 8px; box-sizing: content-box;
+      border: 2px solid var(--line); border-radius: 50%; background: #0a111f; transform: translateY(-50%);
+    }
+    .sb-path button {
+      display: flex; justify-content: space-between; align-items: baseline; gap: 12px; width: 100%; padding: 5px 8px;
+      text-align: left; font-size: 13px; background: none; border: 0; border-radius: 6px;
+    }
+    .sb-path button:hover { background: rgba(255, 255, 255, 0.08); }
+    .sb-path .rank { flex: none; font-size: 11px; color: var(--muted); }
+    .sb-path li.unnamed button { color: var(--muted); font-style: italic; }
+    .sb-path li.current { padding: 5px 8px; font-size: 13px; font-weight: 650; }
+    .sb-path li.current::before { background: var(--clade); border-color: var(--clade); }
+    button.link { padding: 4px 0; font-size: 12px; color: var(--accent); background: none; border: 0; }
+    .sb-actions {
+      display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 20px calc(12px + env(safe-area-inset-bottom));
+      border-top: 1px solid var(--line);
+    }
+    .sb-actions .primary { flex: 1 1 auto; }
+    .sb-share-note { flex: 1 1 100%; }
+    .sb-share-note input { width: 100%; font: inherit; font-size: 12px; color: var(--ink); background: rgba(255, 255, 255, 0.06); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+
+    /* with the sidebar open, the top bar and status line make room for it */
+    .topbar { transition: padding-right 0.3s cubic-bezier(0.2, 0.8, 0.2, 1); }
+    .hud { transition: right 0.3s cubic-bezier(0.2, 0.8, 0.2, 1); }
+    body.sidebar-open .topbar { padding-right: calc(var(--sb-w) + 16px); }
+    body.sidebar-open .hud { right: calc(var(--sb-w) + 16px); }
 
     #tip {
       position: fixed; z-index: 2; pointer-events: none; max-width: 260px;
@@ -139,10 +213,17 @@
       .search { order: 3; flex: 1 1 100%; }
       #q { font-size: 16px; } /* iOS zooms into smaller inputs */
       .hud .hint { display: none; }
-      #detail { top: auto; bottom: 48px; right: 16px; left: 16px; width: auto; }
+      .sidebar {
+        top: auto; left: 0; width: auto; height: 58vh; border-left: 0; border-top: 1px solid var(--line);
+        border-radius: 16px 16px 0 0; box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.45); transform: translateY(100%);
+      }
+      .sb-hero { height: 120px; }
+      body.sidebar-open .topbar { padding-right: 16px; }
+      body.sidebar-open .hud { display: none; }
     }
     @media (prefers-reduced-motion: reduce) {
-      #loading::before, #note.busy::before { animation: none; }
+      #loading::before, #note.busy::before, .skeleton i { animation: none; }
+      .sidebar, .sidebar.open, .topbar, .hud { transition: none; }
     }
   </style>
 </head>
@@ -174,17 +255,47 @@
     <div class="hint">Drag to pan · scroll or pinch to zoom · click a node for details · / to search</div>
   </footer>
 
-  <aside id="detail" role="dialog" aria-labelledby="d-name" hidden>
-    <button id="close" type="button" aria-label="Close details">×</button>
-    <h2 id="d-name"></h2>
-    <p class="sub" id="d-sub"></p>
-    <dl>
-      <dt>OTT ID</dt><dd id="d-ott"></dd>
-      <dt>Rank</dt><dd id="d-rank"></dd>
-      <dt>Descendant tips</dt><dd id="d-tips"></dd>
-      <dt>Child branches</dt><dd id="d-children"></dd>
-    </dl>
-    <div class="actions"><button class="primary" id="d-zoom" type="button">Zoom to this branch</button></div>
+  <aside id="sidebar" class="sidebar" aria-label="Taxon details" inert>
+    <button class="sb-close" data-role="close" type="button" aria-label="Close details">×</button>
+    <div class="sb-scroll" data-role="scroll">
+      <div class="sb-band"></div>
+      <figure class="sb-hero" data-role="hero" hidden>
+        <img data-role="img" alt="" referrerpolicy="no-referrer" decoding="async">
+        <figcaption data-role="credit"></figcaption>
+      </figure>
+      <header class="sb-head">
+        <p class="sb-rank"><span class="dot" data-role="dot"></span><span data-role="rank"></span></p>
+        <h2 data-role="name"></h2>
+        <p class="sb-common" data-role="common" hidden></p>
+        <p class="sb-tagline" data-role="tagline" hidden></p>
+      </header>
+      <section class="sb-section" data-role="about" aria-labelledby="sb-about" aria-busy="false">
+        <h3 id="sb-about">About</h3>
+        <div class="skeleton" data-role="skeleton" hidden><i></i><i></i><i></i></div>
+        <p class="sb-extract" data-role="extract" hidden></p>
+        <p class="sb-msg" data-role="message" hidden></p>
+        <button type="button" data-role="retry" hidden>Try again</button>
+        <p class="sb-sources" data-role="sources"></p>
+      </section>
+      <section class="sb-section" aria-labelledby="sb-facts">
+        <h3 id="sb-facts">Details</h3>
+        <dl class="sb-facts">
+          <dt>OTT ID</dt><dd data-role="ott"></dd>
+          <dt>Descendant tips</dt><dd data-role="tips"></dd>
+          <dt>Child branches</dt><dd data-role="kids"></dd>
+        </dl>
+      </section>
+      <section class="sb-section" aria-labelledby="sb-path">
+        <h3 id="sb-path">Taxonomic path</h3>
+        <ol class="sb-path" data-role="path"></ol>
+        <button type="button" class="link" data-role="toggle" hidden></button>
+      </section>
+    </div>
+    <footer class="sb-actions">
+      <button class="primary" data-role="zoom" type="button">Zoom to this branch</button>
+      <button data-role="share" type="button">Copy link</button>
+      <div class="sb-share-note" data-role="shareNote" role="status" hidden></div>
+    </footer>
   </aside>
 
   <div id="tip" hidden><b></b><span></span></div>
@@ -201,29 +312,15 @@
     import { OtolClient } from './src/otol-client.js';
     import { TreeRenderer } from './src/canvas-renderer.js';
     import { SearchBox } from './src/search-box.js';
+    import { TaxonInfoClient } from './src/taxon-info.js';
+    import { TaxonSidebar } from './src/sidebar.js';
+    import { hashFor, parseHash, shareUrl } from './src/share-link.js';
 
     const $ = (id) => document.getElementById(id);
     const fmt = new Intl.NumberFormat();
     const client = new OtolClient();
-
-    const detail = $('detail');
     const tip = $('tip');
-    let shownId = null;
-
-    function showDetail(info) {
-      if (!info) { shownId = null; detail.hidden = true; return; }
-      shownId = info.id;
-      $('d-name').textContent = info.name;
-      $('d-sub').textContent = info.named ? info.id : 'Unnamed clade (no taxon name in the taxonomy)';
-      $('d-ott').textContent = info.ottId ?? '—';
-      $('d-rank').textContent = info.rank;
-      $('d-tips').textContent = fmt.format(info.numTips);
-      $('d-children').textContent =
-        info.childrenCount !== null ? fmt.format(info.childrenCount)
-        : info.loading ? 'loading…'
-        : 'zoom in to load';
-      detail.hidden = false;
-    }
+    const phone = matchMedia('(max-width: 700px)');
 
     function showTip(info, x, y) {
       if (!info) { tip.hidden = true; return; }
@@ -237,9 +334,41 @@
       tip.style.top = `${y + pad + h > innerHeight ? y - pad - h : y + pad}px`;
     }
 
+    // --- details sidebar and the URL hash -------------------------------------
+    // The hash always names the selected node, so the address bar is the share link.
+    const setHash = (info) => history.replaceState(null, '', hashFor(info));
+    const clearHash = () => { if (location.hash) history.replaceState(null, '', location.pathname + location.search); };
+
+    /** Tell the renderer what the page covers, so flights centre things in the space that's left. */
+    function applyInsets() {
+      const side = $('sidebar');
+      const open = sidebar.isOpen;
+      document.body.classList.toggle('sidebar-open', open);
+      renderer.setInsets({
+        top: phone.matches ? 104 : 60, // the top bar
+        right: open && !phone.matches ? side.offsetWidth : 0,
+        bottom: open && phone.matches ? side.offsetHeight : 0,
+      });
+    }
+
+    function handleSelect(info) {
+      if (!info) { sidebar.hide(); clearHash(); }
+      else { sidebar.show(info, renderer.lineageOf(info.id)); setHash(info); }
+      applyInsets();
+    }
+
+    const sidebar = new TaxonSidebar({
+      root: $('sidebar'),
+      taxonInfo: new TaxonInfoClient(),
+      onPick: (id) => renderer.goTo(renderer.pathTo(id)).catch(() => {}), // an ancestor: it is loaded, so this is just a flight
+      onZoom: (id) => renderer.zoomTo(id),
+      onClose: () => { renderer.clearSelection(); handleSelect(null); },
+      getShare: (info) => ({ url: shareUrl(location, info), title: `${info.name} · Tree of Life` }),
+    });
+
     const renderer = new TreeRenderer($('tree'), {
       client,
-      onSelect: showDetail,
+      onSelect: handleSelect,
       onHover: showTip,
       onStatus({ loading, nodes, focus }) {
         $('focus').textContent = focus.name;
@@ -248,15 +377,16 @@
         $('count').textContent += `${fmt.format(nodes)} nodes loaded`;
       },
     });
+    applyInsets();
+    phone.addEventListener('change', applyInsets);
+    addEventListener('resize', applyInsets);
 
     $('reset').addEventListener('click', () => { flight?.abort(); renderer.resetView(); say(''); });
-    $('close').addEventListener('click', () => { renderer.clearSelection(); showDetail(null); });
-    $('d-zoom').addEventListener('click', () => shownId && renderer.zoomTo(shownId));
     addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && !detail.hidden) { renderer.clearSelection(); showDetail(null); }
+      if (e.key === 'Escape' && sidebar.isOpen && document.activeElement?.id !== 'q') sidebar.onClose();
     });
 
-    // --- search ---------------------------------------------------------------
+    // --- search and deep links ------------------------------------------------
     const note = $('note');
     let noteTimer = 0;
     function say(text, kind = '', ms = 0) {
@@ -267,15 +397,21 @@
       if (text && ms) noteTimer = setTimeout(() => (note.hidden = true), ms);
     }
 
-    let flight = null; // aborts a search whose levels are still loading when a new one starts
-    async function goToTaxon(item) {
+    let flight = null; // aborts a trip whose levels are still loading when a new one starts
+
+    /**
+     * Opens every level down to a node and flies there. `ref` is an OTT id or a node id; `label`
+     * is what the user called it (null for a shared link, which names nothing).
+     */
+    async function travel(ref, label) {
       flight?.abort();
       const { signal } = (flight = new AbortController());
       $('tree').focus({ preventScroll: true });
-      say(`Finding ${item.name}…`, 'busy');
+      const what = label ?? 'the linked node';
+      say(`Finding ${what}…`, 'busy');
       try {
-        const lineage = await client.getLineage(item.ottId, { signal, nearestAncestor: true });
-        const target = lineage.target.name;
+        const lineage = await client.getLineage(ref, { signal, nearestAncestor: true });
+        const target = lineage.alias?.name ?? lineage.target.name;
         say(`Opening ${lineage.path.length - 1} levels down to ${target}…`, 'busy');
         await renderer.goTo(lineage.path, {
           signal,
@@ -285,7 +421,7 @@
         if (!lineage.exact) {
           // The taxonomy knows the name, but it was pruned from the synthetic tree (hybrids, environmental
           // samples, paraphyletic groups like Reptilia); we went to the closest ancestor that is in it.
-          say(`“${item.name}” isn't in the synthetic tree, so this is its closest ancestor, ${target}.`, '', 9000);
+          say(`“${label ?? lineage.requested.name ?? 'That taxon'}” isn't in the synthetic tree, so this is its closest ancestor, ${target}.`, '', 9000);
         } else {
           say('');
         }
@@ -293,19 +429,29 @@
         if (err?.name === 'AbortError' || err?.code === 'aborted') return;
         say(
           err?.code === 'not_found'
-            ? `“${item.name}” isn't in the synthetic tree.`
-            : `Couldn't open ${item.name}: ${err?.message ?? err}`,
+            ? `${label ? `“${label}”` : 'That link'} isn't in the synthetic tree.`
+            : `Couldn't open ${what}: ${err?.message ?? err}`,
           'error',
           9000,
         );
       }
     }
 
+    /** Follow the URL hash, unless it already names what is selected (we write it ourselves on every selection). */
+    async function openFromHash() {
+      if (!location.hash) return;
+      const id = parseHash(location.hash);
+      if (!id) { say('That link doesn’t point to a node of the tree.', 'error', 6000); return; }
+      const sel = renderer.selected?.data;
+      if (sel && (sel.id === id || (sel.ottId && `ott${sel.ottId}` === id))) return;
+      await travel(id, null);
+    }
+
     const search = new SearchBox({
       input: $('q'),
       list: $('results'),
       client,
-      onSelect: goToTaxon,
+      onSelect: (item) => travel(item.ottId, item.name),
       onTyping: () => say(''),
     });
     addEventListener('keydown', (e) => {
@@ -323,6 +469,8 @@
         const info = await client.getTreeInfo();
         $('release').textContent = `Open Tree of Life · synthetic tree ${info.synthId} · taxonomy ${info.taxonomyVersion}`;
         $('tree').focus({ preventScroll: true });
+        addEventListener('hashchange', openFromHash);
+        openFromHash(); // a shared link opens straight to its node
       } catch (err) {
         $('fatal-msg').textContent = err?.message ?? String(err);
         $('fatal').hidden = false;
