@@ -1,0 +1,16 @@
+{
+  "name": "tree-of-life",
+  "version": "0.1.0",
+  "description": "Client for lazily loading the Open Tree of Life synthetic tree",
+  "type": "module",
+  "main": "./src/otol-client.js",
+  "exports": "./src/otol-client.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.js\"",
+    "example": "node examples/explore.js"
+  },
+  "license": "MIT"
+}
