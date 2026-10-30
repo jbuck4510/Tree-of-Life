@@ -108,6 +108,11 @@ function unnamedCladeLabel(raw) {
   return names.length > 0 ? `Clade (${names.join(' + ')})` : raw.node_id;
 }
 
+/** 770315 for "ott770315"; null for unnamed MRCA nodes, which have no taxonomy id. */
+function ottIdOf(id) {
+  return id.startsWith('ott') ? Number(id.slice(3)) : null;
+}
+
 function deepFreeze(value) {
   if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
     Object.freeze(value);
@@ -244,6 +249,118 @@ export class OtolClient {
     return (await this.getNode(nodeId, options)).children;
   }
 
+  /**
+   * Taxon-name suggestions for a partially typed name (OToL's TNRS autocomplete).
+   * Queries under 2 characters resolve to [] without a request. Names are
+   * disambiguated by the API, e.g. "Pan (genus in Holozoa)".
+   * @param {string} query
+   * @param {{signal?: AbortSignal, limit?: number}} [options]
+   * @returns {Promise<{ottId:number, name:string, isHigher:boolean, isSuppressed:boolean}[]>}
+   */
+  async autocomplete(query, { signal, limit = 10 } = {}) {
+    const q = typeof query === 'string' ? query.trim() : '';
+    if (q.length < 2) return [];
+    const all = await this.#cached(`ac:${q.toLowerCase()}`, signal, async () => {
+      const raw = await this.#post('/tnrs/autocomplete_name', { name: q });
+      if (!Array.isArray(raw)) {
+        throw new OtolError('Unexpected autocomplete response', { code: 'bad_response' });
+      }
+      return deepFreeze(
+        raw.map((r) => ({
+          ottId: r.ott_id,
+          name: r.unique_name,
+          isHigher: Boolean(r.is_higher),
+          isSuppressed: Boolean(r.is_suppressed),
+        })),
+      );
+    });
+    return all.slice(0, limit);
+  }
+
+  /**
+   * The path from the root of the synthetic tree down to a node, e.g. for
+   * revealing it. `path` is root-first and ends with the target; each id is a
+   * child of the one before it, so it can be walked with getChildren().
+   *
+   * Many taxa (hybrids, environmental samples, paraphyletic groups such as
+   * Reptilia) were pruned from the synthetic tree and fail with
+   * not_found / reason "pruned_ott_id". With `nearestAncestor`, those resolve to
+   * the closest ancestor in the taxonomy that *is* in the tree instead
+   * (`exact: false`, with `requested` naming what was asked for).
+   *
+   * Many named taxa (Escherichia coli, Canis, Quercus...) have no node of their own
+   * in the synthetic tree: the node is the MRCA of their members and carries no name.
+   * Then `alias` says what the node stands for ({name, rank, ottId}) so it can be
+   * shown as that taxon; it is null when the target node is already named.
+   *
+   * @param {string|number} nodeId  "ott770315" or 770315
+   * @param {{signal?: AbortSignal, nearestAncestor?: boolean}} [options]
+   * @returns {Promise<{target: object, lineage: object[], path: string[], exact: boolean,
+   *   requested: {ottId: number|null, name: string|null},
+   *   alias: {name: string, rank: string, ottId: number}|null}>}
+   */
+  async getLineage(nodeId, { signal, nearestAncestor = false } = {}) {
+    const id = normalizeNodeId(nodeId);
+    const ottId = ottIdOf(id);
+    return this.#cached(`lineage:${id}:${nearestAncestor}`, signal, async () => {
+      let found = null;
+      try {
+        found = await this.#lineageOf(id);
+      } catch (err) {
+        if (!nearestAncestor || err.reason !== 'pruned_ott_id') throw err;
+      }
+      if (found) {
+        const alias = found.target.named || ottId === null ? null : await this.#aliasFor(ottId);
+        return deepFreeze({ ...found, exact: true, requested: { ottId, name: alias?.name ?? found.target.name }, alias });
+      }
+
+      // Pruned. The taxonomy knows its ancestors, nearest first; take the first one that is in the tree.
+      const info = await this.#post('/taxonomy/taxon_info', { ott_id: ottId, include_lineage: true });
+      for (const ancestor of info?.lineage ?? []) {
+        try {
+          found = await this.#lineageOf(`ott${ancestor.ott_id}`);
+        } catch (err) {
+          if (err.reason !== 'pruned_ott_id') throw err;
+          continue;
+        }
+        const alias = found.target.named
+          ? null
+          : { name: ancestor.unique_name ?? ancestor.name, rank: ancestor.rank ?? 'no rank', ottId: ancestor.ott_id };
+        return deepFreeze({
+          ...found,
+          exact: false,
+          requested: { ottId, name: info.unique_name ?? info.name ?? null },
+          alias,
+        });
+      }
+      throw new OtolError(`${id} and all of its ancestors are missing from the synthetic tree`, {
+        code: 'not_found',
+        reason: 'pruned_ott_id',
+      });
+    });
+  }
+
+  /** Name and rank of a taxon, from the taxonomy. Best effort: null if it can't be had. */
+  async #aliasFor(ottId) {
+    try {
+      const info = await this.#post('/taxonomy/taxon_info', { ott_id: ottId });
+      const name = info?.unique_name ?? info?.name;
+      return name ? { name, rank: info.rank ?? 'no rank', ottId } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async #lineageOf(id) {
+    const raw = await this.#post('/tree_of_life/node_info', { node_id: id, include_lineage: true });
+    if (typeof raw?.node_id !== 'string' || !Array.isArray(raw.lineage)) {
+      throw new OtolError(`Unexpected /node_info response for ${id}`, { code: 'bad_response' });
+    }
+    const lineage = raw.lineage.map((a) => formatNode(a)).reverse(); // the API lists nearest ancestor first
+    const target = formatNode(raw);
+    return { target, lineage, path: [...lineage.map((a) => a.id), target.id] };
+  }
+
   clearCache() {
     this.#cache.clear();
   }
@@ -367,7 +484,7 @@ async function httpError(path, res) {
   if (res.status >= 500) {
     return new OtolError(message, { ...info, code: 'server_error', retryable: true });
   }
-  if (res.status === 404 || reason === 'unknown_id' || reason === 'invalid_ott_id') {
+  if (res.status === 404 || ['unknown_id', 'invalid_ott_id', 'pruned_ott_id'].includes(reason)) {
     return new OtolError(message, { ...info, code: 'not_found' });
   }
   return new OtolError(message, { ...info, code: 'bad_request' });

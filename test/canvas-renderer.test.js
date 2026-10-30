@@ -242,15 +242,30 @@ test('re-basing the focus never changes where anything is on screen', async () =
   assert.ok(near(before.x, after.x, 1e-9) && near(before.y, after.y, 1e-9) && near(before.k, after.k, 1e-9));
 });
 
-test('zoomTo jumps exactly to a node 1e-34 smaller than the screen', async () => {
+test('zoomTo flies to a node 1e-34 smaller than the screen: every frame finite, zoom monotonic, landing exact', async () => {
   const { r, chain } = await deepChain(72);
   r.tick(0);
-  assert.ok(r.zoomTo(chain[72].data.id));
-  const t = r._screenTransform(chain[72]);
+  const target = chain[72];
+  assert.ok(r.zoomTo(target.data.id));
+  const fly = r._fly;
+  assert.ok(fly.rho > 1e33 && fly.dur >= 6000, 'a very long flight is slow enough to follow');
+
+  let prevK = 0;
+  let frames = 0;
+  for (let t = 0; r._fly && frames < 2000; t += 16, frames++) {
+    r.tick(t);
+    const s = r._screenTransform(target);
+    assert.ok(Number.isFinite(s.x) && Number.isFinite(s.y) && s.k > 0, `non-finite frame at t=${t}`);
+    assert.ok(s.k >= prevK, `zoom went backwards at t=${t}`);
+    assert.ok(r.view.k < 1e7, `view stays in range (k=${r.view.k})`);
+    assert.ok(r._dots.every((d) => Number.isFinite(d.sx) && Number.isFinite(d.sy)), 'every drawn node has a finite position');
+    prevK = s.k;
+  }
+  assert.ok(frames > 300 && !r._fly, `flight ran for ${frames} frames and ended`);
+  assert.equal(await fly.done, true);
+  const t = r._screenTransform(target);
   assert.ok(near(t.x, W / 2 - t.k * 0.9, 1e-9) && near(t.y, H / 2, 1e-9), 'centred on the target');
   assert.ok(t.k > 300 && t.k < 700, `fits the screen (k=${t.k})`);
-  r.tick(16);
-  assert.ok(near(chain[72].sy, H / 2, 1e-9), 'and drawn there');
   assert.equal(r.zoomTo('nope'), false);
 });
 
@@ -275,6 +290,195 @@ test('zoomTo flies to an on-screen node along a smooth, monotonic path', async (
   assert.ok(ks.at(-1) > from.k * 1.5, 'and then it actually zoomed in');
   const end = r._screenTransform(target);
   assert.ok(near(end.y, H / 2, 1e-6) && near(end.x, W / 2 - end.k * 0.9, 1e-6), 'ends centred');
+});
+
+// --- search: goTo ---------------------------------------------------------
+
+/** Chain n0 > n1 > ... > n<depth>; each node also has a small sibling `n<i>x`. Counts concurrency. */
+function chainClient(depth, { delay = 0, failAt = null } = {}) {
+  const kids = {};
+  for (let i = 0; i < depth; i++) kids[`n${i}`] = [data(`n${i + 1}`, 1000, i + 1 < depth), data(`n${i}x`, 10, false)];
+  const client = {
+    calls: [], inflight: 0, maxInflight: 0,
+    async getRoot() { return { ...data('n0', 1e6, true), children: kids.n0 }; },
+    async getChildren(id, { signal } = {}) {
+      client.calls.push(id);
+      client.maxInflight = Math.max(client.maxInflight, ++client.inflight);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        signal?.throwIfAborted();
+        if (id === failAt) throw Object.assign(new Error('boom'), { code: 'server_error' });
+        return kids[id];
+      } finally {
+        client.inflight--;
+      }
+    },
+  };
+  return { client, path: Array.from({ length: depth + 1 }, (_, i) => `n${i}`) };
+}
+
+/**
+ * Ticks the renderer on a fake clock until the promise settles, and returns `{v}` or `{e}`.
+ * With `until`, stops as soon as that is true and returns null, leaving the promise running.
+ */
+async function drive(r, promise, { until = null } = {}) {
+  let settled = false;
+  const outcome = promise.then((v) => ({ v }), (e) => ({ e })).finally(() => { settled = true; });
+  for (let t = 0; !settled && t < 60_000; t += 16) {
+    r.tick(t);
+    await new Promise((resolve) => setImmediate(resolve));
+    if (until?.()) return null;
+  }
+  return outcome;
+}
+
+async function searchRenderer(depth, opts) {
+  const { client, path } = chainClient(depth, opts);
+  const events = { selected: [] };
+  const r = new TreeRenderer(fakeCanvas(), { client, requestFrame: () => 1, cancelFrame() {}, onSelect: (i) => events.selected.push(i) });
+  await r.start();
+  return { r, client, path, events };
+}
+
+test('goTo hides the old details at once, reports the flight start, and shows the target only on arrival', async () => {
+  const { r, path, events } = await searchRenderer(10, { delay: 2 });
+  r.selected = r.root; // something was selected before searching
+  const log = [];
+  const p = r.goTo(path, { onFlightStart: () => log.push(['flight', r._fly === null]) });
+  assert.equal(events.selected.at(-1), null, 'old details dismissed synchronously');
+  assert.equal(r.selected, null);
+  const before = events.selected.length;
+  await drive(r, p, { until: () => log.length > 0 });
+  assert.deepEqual(log, [['flight', true]], 'called just before the camera sets off');
+  assert.equal(events.selected.length, before, 'no details shown while travelling');
+  assert.ok(r.selected === r._byId.get('n10'), 'but the target is already marked');
+  const { v } = await drive(r, p);
+  assert.equal(v, true);
+  assert.equal(events.selected.at(-1).id, 'n10', 'details arrive with the camera');
+  assert.equal(events.selected.length, before + 1);
+});
+
+test('goTo expands every ancestor, selects the target and flies the camera to it', async () => {
+  const { r, client, path, events } = await searchRenderer(20, { delay: 2 });
+  const { v, e } = await drive(r, r.goTo(path));
+  assert.equal(e, undefined);
+  assert.equal(v, true, 'arrived');
+
+  for (let i = 0; i < path.length - 1; i++) assert.ok(r._byId.get(path[i]).expanded, `${path[i]} expanded`);
+  const target = r._byId.get('n20');
+  assert.ok(target && !target.expanded);
+  assert.ok(r.selected === target);
+  assert.equal(events.selected.at(-1).id, 'n20');
+  const s = r._screenTransform(target);
+  assert.ok(near(s.y, H / 2, 1e-6) && s.k > 300, 'the target fills the view');
+  assert.ok(r.focus.depth >= 18, `focus re-based down to the target (depth ${r.focus.depth})`);
+});
+
+test('goTo fetches the missing levels in parallel, but never more than six at once', async () => {
+  const { r, client, path } = await searchRenderer(30, { delay: 5 });
+  await drive(r, r.goTo(path), { until: () => client.calls.length >= 29 });
+  assert.equal(client.calls.length, 29, 'n1..n29 (the root was loaded by start)');
+  assert.ok(client.maxInflight > 1, `ran in parallel (peak ${client.maxInflight})`);
+  assert.ok(client.maxInflight <= 6, `bounded (peak ${client.maxInflight})`);
+});
+
+test('goTo skips levels that are already loaded', async () => {
+  const { r, client, path } = await searchRenderer(10);
+  await drive(r, r.goTo(path));
+  const before = client.calls.length;
+  await drive(r, r.goTo(path.slice(0, 6)));
+  assert.equal(client.calls.length, before, 'nothing is fetched twice');
+  assert.ok(r.selected === r._byId.get('n5'));
+});
+
+test('goTo to the root just flies there', async () => {
+  const { r, client } = await searchRenderer(3);
+  r.zoomAt(500, 350, 50);
+  const p = r.goTo(['n0']);
+  await flush(); // let goTo get past its first await and start the flight
+  let during = null;
+  for (let t = 0; t < 3000; t += 16) {
+    r.tick(t);
+    if (r._fly) during = client.calls.length;
+  }
+  assert.equal(await p, true);
+  assert.equal(during, 0, 'goTo itself needs no requests, and none start mid-flight');
+  assert.ok(near(r._screenTransform(r.root).y, H / 2, 1e-6));
+});
+
+test('goTo rejects bad paths without touching the tree', async () => {
+  const { r, client } = await searchRenderer(5);
+  await assert.rejects(r.goTo([]), /root/);
+  await assert.rejects(r.goTo(['n3', 'n4']), /root/);
+  await assert.rejects(r.goTo(['n0', 'n3']), /not a child of n0/);
+  assert.equal(client.calls.length, 0, 'nothing was fetched (the root is loaded already)');
+});
+
+test('aborting goTo stops it from attaching anything or moving the camera', async () => {
+  const { r, client, path } = await searchRenderer(40, { delay: 10 });
+  const ctrl = new AbortController();
+  const p = r.goTo(path, { signal: ctrl.signal });
+  setTimeout(() => ctrl.abort(), 15);
+  const { e } = await drive(r, p);
+  assert.equal(e?.name, 'AbortError');
+  assert.ok(client.calls.length <= 18, `it stopped starting requests (${client.calls.length} of 39)`);
+  assert.ok(!r._byId.get('n8'), 'nothing was attached');
+  assert.ok(r._fly === null && r.selected === null);
+});
+
+test('a failing level rejects goTo with that error and stops fetching the rest', async () => {
+  const { r, client, path } = await searchRenderer(25, { delay: 3, failAt: 'n4' });
+  const { e } = await drive(r, r.goTo(path));
+  assert.equal(e?.message, 'boom');
+  assert.ok(client.calls.length < 24, `stopped early (${client.calls.length} calls)`);
+  assert.ok(!r._byId.get('n5'), 'a partial path is not attached');
+});
+
+test('grabbing the canvas during the flight cancels it: goTo resolves false, the selection stays', async () => {
+  const { r, path } = await searchRenderer(12);
+  const p = r.goTo(path);
+  await drive(r, p, { until: () => r._fly && r._fly.t0 !== null });
+  assert.ok(r._fly, 'in flight');
+  r.tick(r._fly.t0 + 100);
+  r._pointerDown({ pointerId: 1, pointerType: 'mouse', button: 0, clientX: 10, clientY: 10, timeStamp: 1 });
+  assert.equal(await p, false);
+  assert.ok(r._fly === null);
+  assert.ok(r.selected === r._byId.get('n12'));
+});
+
+test('a newer flight supersedes the previous one', async () => {
+  const { r, path } = await searchRenderer(10);
+  const a = r.goTo(path);
+  await drive(r, a, { until: () => r._fly });
+  const first = r._fly.done;
+  const b = await drive(r, r.goTo(path.slice(0, 5)));
+  assert.equal(await first, false);
+  assert.equal(b.v, true);
+  assert.ok(r.selected === r._byId.get('n4'));
+});
+
+test('goTo takes over a node the zoom-driven loader is already fetching, and holds the loader off meanwhile', async () => {
+  const { r, client, path } = await searchRenderer(6, { delay: 10 });
+  settle(r);
+  r.tick(100); // n1 is big and on screen, so the loader starts on it
+  const n1 = r._byId.get('n1');
+  assert.ok(n1.loading, 'the loader is fetching n1');
+  const p = r.goTo(path);
+  assert.equal(r._revealing, 1);
+  const { v } = await drive(r, p);
+  assert.equal(r._revealing, 0, 'released once the reveal is done');
+  assert.equal(v, true);
+  assert.equal(n1.loading, false);
+  assert.equal(n1.children.length, 2, 'attached once, not twice');
+  assert.equal(r._loading.size, 0);
+});
+
+test('no load requests are started while the camera is flying', async () => {
+  const { r, client, path } = await searchRenderer(8);
+  await drive(r, r.goTo(path), { until: () => r._fly });
+  const before = client.calls.length;
+  for (let t = 0; r._fly && t < 3000; t += 16) r.tick(t);
+  assert.equal(client.calls.length, before);
 });
 
 // --- lazy loading ----------------------------------------------------------
@@ -434,6 +638,38 @@ test('a touch whose pointer is already gone does not break pointer handling', as
   const { r } = await makeRenderer(bigRoot());
   r.canvas.setPointerCapture = () => { throw new DOMException('No active pointer', 'NotFoundError'); };
   assert.doesNotThrow(() => r._pointerDown({ pointerId: 7, pointerType: 'touch', clientX: 5, clientY: 5, timeStamp: 0 }));
+});
+
+test('an unnamed MRCA node can adopt the identity of the taxon it stands for', () => {
+  const mrca = new RNode(data('mrcaott616ott617', 2712, true, { named: false, name: 'Clade (A + B)' }), null);
+  const before = { radius: mrca.radius, alpha: mrca.targetAlpha, color: mrca.color };
+  mrca.adopt({ name: 'Escherichia coli', rank: 'species', ottId: 474506 });
+  assert.equal(mrca.data.name, 'Escherichia coli');
+  assert.equal(mrca.label, 'Escherichia coli');
+  assert.equal(mrca.data.rank, 'species');
+  assert.equal(mrca.data.ottId, 474506);
+  assert.equal(mrca.data.named, true);
+  assert.equal(mrca.data.id, 'mrcaott616ott617', 'it is still the same node');
+  assert.ok(mrca.radius > before.radius && mrca.targetAlpha > before.alpha && mrca.color !== before.color, 'and now styled as a named taxon');
+  assert.ok(Object.isFrozen(mrca.data));
+});
+
+test('goTo applies `as` to an unnamed target but never renames a named one', async () => {
+  const { client, path } = chainClient(4);
+  const kids = await client.getChildren('n3');
+  const unnamed = { ...kids[0], named: false, name: 'Clade (A + B)', ottId: null };
+  const tree = { ...client, getChildren: async (id) => (id === 'n3' ? [unnamed, kids[1]] : client.getChildren(id)) };
+  const r = new TreeRenderer(fakeCanvas(), { client: tree, requestFrame: () => 1, cancelFrame() {} });
+  await r.start();
+  const as = { name: 'Escherichia coli', rank: 'species', ottId: 474506 };
+  await drive(r, r.goTo(path, { as }));
+  const target = r._byId.get('n4');
+  assert.equal(target.data.name, 'Escherichia coli');
+  assert.equal(r.selected.data.ottId, 474506);
+
+  const named = await searchRenderer(4);
+  await drive(named.r, named.r.goTo(named.path, { as }));
+  assert.equal(named.r._byId.get('n4').data.name, 'n4', 'a node that already has a name keeps it');
 });
 
 test('unnamed clades are drawn fainter and smaller than named taxa', () => {

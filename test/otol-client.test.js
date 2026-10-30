@@ -344,3 +344,165 @@ test('an already-aborted signal rejects immediately without a request', async ()
   await assert.rejects(client(fetch).getNode('ott1', { signal: AbortSignal.abort() }), { code: 'aborted' });
   assert.equal(fetch.calls.length, 0);
 });
+
+// --- search: autocomplete and lineage ---
+
+const AUTOCOMPLETE = [
+  { is_higher: false, is_suppressed: false, ott_id: 770315, unique_name: 'Homo sapiens' },
+  { is_higher: true, is_suppressed: false, ott_id: 5, unique_name: 'Homo (genus in Holozoa)' },
+  { is_higher: false, is_suppressed: true, ott_id: 83926, unique_name: 'Homo sapiens neanderthalensis' },
+];
+
+test('autocomplete maps the API fields, honours limit, and skips the network for short queries', async () => {
+  const fetch = stubFetch({ '/tnrs/autocomplete_name': AUTOCOMPLETE });
+  const c = client(fetch);
+  assert.deepEqual(await c.autocomplete(''), []);
+  assert.deepEqual(await c.autocomplete(' h '), []);
+  assert.deepEqual(await c.autocomplete(undefined), []);
+  assert.equal(fetch.calls.length, 0);
+
+  const hits = await c.autocomplete(' homo sap ');
+  assert.deepEqual(fetch.calls[0].body, { name: 'homo sap' }, 'the query is trimmed');
+  assert.deepEqual(hits[0], { ottId: 770315, name: 'Homo sapiens', isHigher: false, isSuppressed: false });
+  assert.equal(hits[1].isHigher, true);
+  assert.equal(hits[2].isSuppressed, true);
+  assert.equal((await c.autocomplete('homo sap', { limit: 2 })).length, 2);
+});
+
+test('autocomplete caches per query regardless of case and shares in-flight requests', async () => {
+  const fetch = stubFetch({
+    '/tnrs/autocomplete_name': async () => { await new Promise((r) => setTimeout(r, 10)); return AUTOCOMPLETE; },
+  });
+  const c = client(fetch);
+  await Promise.all([c.autocomplete('Homo'), c.autocomplete('homo'), c.autocomplete('HOMO ')]);
+  await c.autocomplete('homo');
+  assert.equal(fetch.calls.length, 1);
+  await c.autocomplete('homo s');
+  assert.equal(fetch.calls.length, 2);
+});
+
+test('autocomplete can be aborted, and rejects malformed responses', async () => {
+  const c = client(stubFetch({ '/tnrs/autocomplete_name': async () => { await new Promise((r) => setTimeout(r, 20)); return AUTOCOMPLETE; } }));
+  const ctrl = new AbortController();
+  const pending = c.autocomplete('homo', { signal: ctrl.signal });
+  ctrl.abort();
+  await assert.rejects(pending, { code: 'aborted' });
+  await assert.rejects(client(stubFetch({ '/tnrs/autocomplete_name': { not: 'a list' } })).autocomplete('homo'), { code: 'bad_response' });
+});
+
+// node_info for Homo sapiens, trimmed: the lineage is listed nearest ancestor first
+const NODE_INFO = {
+  node_id: 'ott770315',
+  num_tips: 2,
+  taxon: taxon('Homo sapiens', 770315, 'species'),
+  lineage: [
+    { node_id: 'mrcaott83926ott3607676', num_tips: 3, descendant_name_list: ['Homo sapiens', 'Homo'] },
+    { node_id: 'ott5342311', num_tips: 40, taxon: taxon('Homo', 5342311, 'genus') },
+    { node_id: 'ott93302', num_tips: 2385875, taxon: taxon('cellular organisms', 93302, 'no rank') },
+  ],
+};
+
+test('getLineage returns a root-first path ending at the target', async () => {
+  const fetch = stubFetch({ '/tree_of_life/node_info': NODE_INFO });
+  const c = client(fetch);
+  const lin = await c.getLineage(770315);
+  assert.deepEqual(fetch.calls[0].body, { node_id: 'ott770315', include_lineage: true });
+  assert.deepEqual(lin.path, ['ott93302', 'ott5342311', 'mrcaott83926ott3607676', 'ott770315']);
+  assert.equal(lin.target.name, 'Homo sapiens');
+  assert.deepEqual(lin.lineage.map((n) => n.name), ['cellular organisms', 'Homo', 'Clade (Homo sapiens + Homo)']);
+  assert.equal(lin.exact, true);
+  assert.ok(Object.isFrozen(lin) && Object.isFrozen(lin.path));
+  await c.getLineage('ott770315');
+  assert.equal(fetch.calls.length, 1, 'cached, whichever way the id is spelled');
+});
+
+test('getLineage rejects pruned taxa with not_found/pruned_ott_id unless asked to fall back', async () => {
+  const pruned = json({ message: "node_id 'ott5257442' was not found!", reason: 'pruned_ott_id' }, 400);
+  const fetch = stubFetch({ '/tree_of_life/node_info': pruned });
+  await assert.rejects(client(fetch).getLineage(5257442), (e) => e.code === 'not_found' && e.reason === 'pruned_ott_id');
+  assert.equal(fetch.calls.length, 1, 'a 400 is not retried');
+  await assert.rejects(client(stubFetch({ '/tree_of_life/node_info': json({ reason: 'invalid_ott_id', message: 'x' }, 400) })).getLineage(5), { code: 'not_found' });
+});
+
+test('getLineage with nearestAncestor walks the taxonomy lineage to the first taxon that is in the tree', async () => {
+  const tried = [];
+  const fetch = stubFetch({
+    '/tree_of_life/node_info': (body) => {
+      tried.push(body.node_id);
+      return body.node_id === 'ott244265'
+        ? { ...NODE_INFO, node_id: 'ott244265', taxon: taxon('Mammalia', 244265, 'class') }
+        : json({ message: 'pruned', reason: 'pruned_ott_id' }, 400);
+    },
+    '/taxonomy/taxon_info': {
+      name: 'Homo sapiens x Rattus norvegicus fusion cell line',
+      lineage: [{ ott_id: 111, name: 'Hybrida' }, { ott_id: 244265, name: 'Mammalia' }, { ott_id: 93302, name: 'cellular organisms' }],
+    },
+  });
+  const lin = await client(fetch).getLineage(7067103, { nearestAncestor: true });
+  assert.deepEqual(tried, ['ott7067103', 'ott111', 'ott244265'], 'nearest first, stopping at the first hit');
+  assert.deepEqual(fetch.calls.find((c) => c.path === '/taxonomy/taxon_info').body, { ott_id: 7067103, include_lineage: true });
+  assert.equal(lin.exact, false);
+  assert.equal(lin.target.name, 'Mammalia');
+  assert.deepEqual(lin.requested, { ottId: 7067103, name: 'Homo sapiens x Rattus norvegicus fusion cell line' });
+});
+
+test('nearestAncestor does not paper over other errors, and fails clearly if nothing is in the tree', async () => {
+  const prunedAlways = stubFetch({
+    '/tree_of_life/node_info': json({ message: 'p', reason: 'pruned_ott_id' }, 400),
+    '/taxonomy/taxon_info': { lineage: [{ ott_id: 1 }, { ott_id: 2 }] },
+  });
+  await assert.rejects(client(prunedAlways).getLineage(9, { nearestAncestor: true }), (e) => e.code === 'not_found' && /ancestors/.test(e.message));
+
+  const unknown = stubFetch({ '/tree_of_life/node_info': json({ message: 'x', reason: 'invalid_ott_id' }, 400) });
+  await assert.rejects(client(unknown).getLineage(9, { nearestAncestor: true }), { reason: 'invalid_ott_id' });
+  assert.equal(unknown.calls.length, 1, 'no taxonomy lookup for ids that simply do not exist');
+});
+
+// A named taxon with no node of its own: node_info answers with the (unnamed) MRCA node
+const MRCA_INFO = {
+  node_id: 'mrcaott616ott617',
+  num_tips: 2712,
+  lineage: [{ node_id: 'ott93302', num_tips: 2385875, taxon: taxon('cellular organisms', 93302, 'no rank') }],
+};
+
+test('a taxon that is only an unnamed MRCA node gets an alias saying what it stands for', async () => {
+  const fetch = stubFetch({
+    '/tree_of_life/node_info': MRCA_INFO,
+    '/taxonomy/taxon_info': { name: 'Escherichia coli', unique_name: 'Escherichia coli', rank: 'species', ott_id: 474506 },
+  });
+  const lin = await client(fetch).getLineage(474506);
+  assert.equal(lin.exact, true);
+  assert.equal(lin.target.id, 'mrcaott616ott617');
+  assert.equal(lin.target.named, false);
+  assert.deepEqual(lin.alias, { name: 'Escherichia coli', rank: 'species', ottId: 474506 });
+  assert.deepEqual(lin.requested, { ottId: 474506, name: 'Escherichia coli' });
+  assert.deepEqual(fetch.calls.find((c) => c.path === '/taxonomy/taxon_info').body, { ott_id: 474506 });
+});
+
+test('named targets need no alias and cost no extra request', async () => {
+  const fetch = stubFetch({ '/tree_of_life/node_info': NODE_INFO });
+  const lin = await client(fetch).getLineage(770315);
+  assert.equal(lin.alias, null);
+  assert.deepEqual(fetch.calls.map((c) => c.path), ['/tree_of_life/node_info']);
+});
+
+test('if the alias lookup fails the search still works, just without it', async () => {
+  const fetch = stubFetch({ '/tree_of_life/node_info': MRCA_INFO, '/taxonomy/taxon_info': json({}, 500) });
+  const lin = await client(fetch, { retries: 0 }).getLineage(474506);
+  assert.equal(lin.alias, null);
+  assert.equal(lin.path.at(-1), 'mrcaott616ott617');
+});
+
+test('an unnamed fallback ancestor is aliased from the taxonomy lineage that already named it', async () => {
+  const fetch = stubFetch({
+    '/tree_of_life/node_info': (body) => (body.node_id === 'ott47497' ? MRCA_INFO : json({ message: 'p', reason: 'pruned_ott_id' }, 400)),
+    '/taxonomy/taxon_info': {
+      unique_name: 'Canis lupus x Canis familiaris',
+      lineage: [{ ott_id: 47497, name: 'Canis', unique_name: 'Canis', rank: 'genus' }],
+    },
+  });
+  const lin = await client(fetch).getLineage(5, { nearestAncestor: true });
+  assert.equal(lin.exact, false);
+  assert.deepEqual(lin.alias, { name: 'Canis', rank: 'genus', ottId: 47497 });
+  assert.equal(fetch.calls.filter((c) => c.path === '/taxonomy/taxon_info').length, 1, 'no second lookup needed');
+});

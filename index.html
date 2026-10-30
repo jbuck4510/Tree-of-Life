@@ -27,9 +27,59 @@
     }
     #tree { position: fixed; inset: 0; width: 100%; height: 100%; display: block; outline: none; cursor: grab; }
 
-    .brand { position: fixed; top: 16px; left: 16px; pointer-events: none; }
+    .topbar {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 3; pointer-events: none;
+      display: flex; align-items: flex-start; gap: 16px; padding: 14px 16px;
+    }
+    .topbar > * { pointer-events: auto; }
+    .brand { flex: 1 1 0; min-width: 0; pointer-events: none; }
     .brand h1 { margin: 0; font-size: 18px; font-weight: 650; letter-spacing: 0.01em; }
-    .brand p { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
+    .brand p { margin: 2px 0 0; color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #reset { flex: 1 1 0; max-width: max-content; margin-left: auto; }
+
+    .search { position: relative; flex: 0 1 460px; min-width: 0; }
+    .search label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+    #q {
+      width: 100%; font: inherit; font-size: 15px; color: var(--ink);
+      background: var(--panel); border: 1px solid var(--line); border-radius: 999px;
+      padding: 9px 40px 9px 38px; backdrop-filter: blur(10px);
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='none' stroke='%2393a3c4' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='7' cy='7' r='5'/%3E%3Cpath d='m11 11 4 4'/%3E%3C/svg%3E");
+      background-repeat: no-repeat; background-position: 14px 50%;
+    }
+    #q::placeholder { color: var(--muted); }
+    #q:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    .search kbd {
+      position: absolute; right: 12px; top: 50%; transform: translateY(-50%); pointer-events: none;
+      font: 12px/1 system-ui, sans-serif; color: var(--muted); border: 1px solid var(--line); border-radius: 5px; padding: 3px 6px;
+    }
+    .search:focus-within kbd, #q:not(:placeholder-shown) ~ kbd { display: none; }
+
+    #results {
+      position: absolute; top: calc(100% + 6px); left: 0; right: 0; margin: 0; padding: 4px; list-style: none;
+      background: var(--panel); border: 1px solid var(--line); border-radius: 14px; backdrop-filter: blur(12px);
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5); max-height: min(60vh, 420px); overflow-y: auto;
+    }
+    #results[hidden] { display: none; }
+    #results.busy { opacity: 0.55; }
+    #results li { display: flex; align-items: baseline; gap: 10px; padding: 8px 12px; border-radius: 10px; cursor: pointer; }
+    #results li[aria-selected="true"] { background: rgba(255, 209, 102, 0.16); }
+    #results li.note { color: var(--muted); cursor: default; }
+    #results li.error { color: var(--danger); }
+    #results .name { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+    #results .name b { color: var(--accent); font-weight: 650; }
+    #results .tag { flex: none; font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; }
+
+    #note {
+      position: absolute; top: calc(100% + 8px); left: 50%; transform: translateX(-50%); width: max-content; max-width: 100%;
+      margin: 0; padding: 6px 14px; border-radius: 999px; font-size: 13px; text-align: center;
+      background: var(--panel); border: 1px solid var(--line); box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+    }
+    #note[hidden] { display: none; }
+    #note.busy::before {
+      content: ""; display: inline-block; width: 9px; height: 9px; margin-right: 8px; vertical-align: -1px;
+      border: 2px solid #9ad1ff; border-right-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite;
+    }
+    #note.error { color: var(--danger); }
 
     .hud {
       position: fixed; left: 16px; right: 16px; bottom: 14px;
@@ -53,10 +103,9 @@
     button:focus-visible, #tree:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     button.primary { background: var(--accent); color: #1b1500; border-color: transparent; font-weight: 600; }
     button.primary:hover { background: #ffdc8a; }
-    #reset { position: fixed; top: 14px; right: 16px; }
 
     #detail {
-      position: fixed; top: 60px; right: 16px; width: min(320px, calc(100vw - 32px));
+      position: fixed; top: 124px; right: 16px; width: min(320px, calc(100vw - 32px));
       background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px;
       backdrop-filter: blur(10px); box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
     }
@@ -84,12 +133,16 @@
     #fatal p { margin: 0; max-width: 46ch; }
     #fatal .err { color: var(--danger); font-size: 12px; }
 
-    @media (max-width: 560px) {
+    @media (max-width: 700px) {
+      .topbar { flex-wrap: wrap; gap: 10px; }
+      .brand p { display: none; }
+      .search { order: 3; flex: 1 1 100%; }
+      #q { font-size: 16px; } /* iOS zooms into smaller inputs */
       .hud .hint { display: none; }
       #detail { top: auto; bottom: 48px; right: 16px; left: 16px; width: auto; }
     }
     @media (prefers-reduced-motion: reduce) {
-      #loading::before { animation: none; }
+      #loading::before, #note.busy::before { animation: none; }
     }
   </style>
 </head>
@@ -97,18 +150,28 @@
   <canvas id="tree" tabindex="0" role="img"
     aria-label="Interactive Tree of Life. Drag to pan, scroll or pinch to zoom, click a branch for details. Arrow keys pan, plus and minus zoom."></canvas>
 
-  <header class="brand">
-    <h1>Tree of Life</h1>
-    <p id="release">Open Tree of Life synthetic tree</p>
+  <header class="topbar">
+    <div class="brand">
+      <h1>Tree of Life</h1>
+      <p id="release">Open Tree of Life synthetic tree</p>
+    </div>
+    <div class="search" role="search">
+      <label for="q">Search for a species or group</label>
+      <input id="q" type="text" placeholder="Search species or groups" autocomplete="off" autocapitalize="off"
+        spellcheck="false" enterkeyhint="search">
+      <kbd aria-hidden="true">/</kbd>
+      <ul id="results" hidden></ul>
+      <p id="note" role="status" hidden></p>
+    </div>
+    <button id="reset" type="button" title="Back to the whole tree (0)">Reset view</button>
   </header>
-  <button id="reset" type="button" title="Back to the whole tree (0)">Reset view</button>
 
   <footer class="hud" aria-live="polite">
     <div>
       <div>Viewing <b id="focus">…</b></div>
       <div><span id="loading" hidden></span><span id="count"></span></div>
     </div>
-    <div class="hint">Drag to pan · scroll or pinch to zoom · click a node for details</div>
+    <div class="hint">Drag to pan · scroll or pinch to zoom · click a node for details · / to search</div>
   </footer>
 
   <aside id="detail" role="dialog" aria-labelledby="d-name" hidden>
@@ -137,6 +200,7 @@
   <script type="module">
     import { OtolClient } from './src/otol-client.js';
     import { TreeRenderer } from './src/canvas-renderer.js';
+    import { SearchBox } from './src/search-box.js';
 
     const $ = (id) => document.getElementById(id);
     const fmt = new Intl.NumberFormat();
@@ -185,11 +249,71 @@
       },
     });
 
-    $('reset').addEventListener('click', () => renderer.resetView());
+    $('reset').addEventListener('click', () => { flight?.abort(); renderer.resetView(); say(''); });
     $('close').addEventListener('click', () => { renderer.clearSelection(); showDetail(null); });
     $('d-zoom').addEventListener('click', () => shownId && renderer.zoomTo(shownId));
     addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && !detail.hidden) { renderer.clearSelection(); showDetail(null); }
+    });
+
+    // --- search ---------------------------------------------------------------
+    const note = $('note');
+    let noteTimer = 0;
+    function say(text, kind = '', ms = 0) {
+      clearTimeout(noteTimer);
+      note.hidden = !text;
+      note.className = kind;
+      note.textContent = text;
+      if (text && ms) noteTimer = setTimeout(() => (note.hidden = true), ms);
+    }
+
+    let flight = null; // aborts a search whose levels are still loading when a new one starts
+    async function goToTaxon(item) {
+      flight?.abort();
+      const { signal } = (flight = new AbortController());
+      $('tree').focus({ preventScroll: true });
+      say(`Finding ${item.name}…`, 'busy');
+      try {
+        const lineage = await client.getLineage(item.ottId, { signal, nearestAncestor: true });
+        const target = lineage.target.name;
+        say(`Opening ${lineage.path.length - 1} levels down to ${target}…`, 'busy');
+        await renderer.goTo(lineage.path, {
+          signal,
+          as: lineage.alias, // e.g. "Escherichia coli" has no node of its own; this unnamed node stands for it
+          onFlightStart: () => say(`Flying to ${target}…`, 'busy'),
+        });
+        if (!lineage.exact) {
+          // The taxonomy knows the name, but it was pruned from the synthetic tree (hybrids, environmental
+          // samples, paraphyletic groups like Reptilia); we went to the closest ancestor that is in it.
+          say(`“${item.name}” isn't in the synthetic tree, so this is its closest ancestor, ${target}.`, '', 9000);
+        } else {
+          say('');
+        }
+      } catch (err) {
+        if (err?.name === 'AbortError' || err?.code === 'aborted') return;
+        say(
+          err?.code === 'not_found'
+            ? `“${item.name}” isn't in the synthetic tree.`
+            : `Couldn't open ${item.name}: ${err?.message ?? err}`,
+          'error',
+          9000,
+        );
+      }
+    }
+
+    const search = new SearchBox({
+      input: $('q'),
+      list: $('results'),
+      client,
+      onSelect: goToTaxon,
+      onTyping: () => say(''),
+    });
+    addEventListener('keydown', (e) => {
+      if (e.key === '/' && !e.metaKey && !e.ctrlKey && !e.altKey && !/^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName)) {
+        e.preventDefault();
+        $('q').focus();
+        $('q').select();
+      }
     });
 
     async function boot() {

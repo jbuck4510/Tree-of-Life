@@ -62,13 +62,32 @@ const ASCEND_PX = 40; // refocus on the parent when the focus gets this small...
 const DESCEND_PX = 320; // ...and on a child once it is this big and under the centre
 const ANCHOR_MAX_K = 2e5; // draw from the highest ancestor still below this scale
 const K_MAX = 5e7;
-const FLY_MAX_RATIO = 1e4; // zoomTo flies up to this magnification, and jumps beyond it
+const REVEAL_CONCURRENCY = 6; // levels of a path fetched at once by goTo()
 const MIN_ROOT_ZOOM = 0.5; // can't zoom out past half of the fitted root
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 /** Keeps a dot readable as you zoom into it, instead of swelling until it fills the screen. */
 const softCap = (r) => (r <= DOT_SOFT_MAX_PX ? r : DOT_SOFT_MAX_PX + 6 * Math.log(r / DOT_SOFT_MAX_PX));
+
+/** Runs fn over items with at most `limit` in flight; stops starting new ones after a failure or abort. */
+async function mapLimit(items, limit, signal, fn) {
+  let next = 0;
+  let failed = false;
+  const worker = async () => {
+    while (next < items.length && !failed) {
+      signal?.throwIfAborted();
+      const item = items[next++];
+      try {
+        await fn(item);
+      } catch (err) {
+        failed = true;
+        throw err;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+}
 
 /**
  * Divides a parent's unit height among its children.
@@ -107,7 +126,7 @@ export class RNode {
     this.x = 0;
     this.y = 0;
     this.scale = 1;
-    this.radius = (0.02 + 0.009 * Math.log10(data.numTips + 1)) * (data.named ? 1 : 0.6);
+    this.radius = 0;
     this.grow = parent ? 0 : 1;
 
     this.expanded = false;
@@ -119,12 +138,12 @@ export class RNode {
     this.unwantedSince = null;
 
     this.alpha = 0;
-    this.targetAlpha = data.named ? 1 : 0.7; // unnamed clades are drawn fainter
+    this.targetAlpha = 1;
 
     this.hue = 165;
     this.hueSpread = 150;
     this.color = '';
-    this.label = data.name.length > 36 ? `${data.name.slice(0, 35)}…` : data.name;
+    this.label = '';
     this.labelW = 0;
 
     // Screen-space results of the last frame this node was visited
@@ -135,7 +154,27 @@ export class RNode {
     this.shown = 0;
     this.wanted = -1;
 
+    this.restyle();
+  }
+
+  /** Size, opacity and label from `data`; unnamed clades are smaller and fainter. */
+  restyle() {
+    const d = this.data;
+    this.radius = (0.02 + 0.009 * Math.log10(d.numTips + 1)) * (d.named ? 1 : 0.6);
+    this.targetAlpha = d.named ? 1 : 0.7;
+    this.label = d.name.length > 36 ? `${d.name.slice(0, 35)}…` : d.name;
+    this.labelW = 0;
     this.setHue(this.hue);
+  }
+
+  /**
+   * Many taxa have no node of their own in the synthetic tree; they are an unnamed MRCA
+   * node. When the user searches for one, the node takes the taxon's identity so it is
+   * shown (and styled) as what they asked for.
+   */
+  adopt({ name, rank, ottId }) {
+    this.data = Object.freeze({ ...this.data, name, rank: rank ?? this.data.rank, ottId: ottId ?? this.data.ottId, named: true });
+    this.restyle();
   }
 
   setHue(h) {
@@ -256,6 +295,7 @@ export class TreeRenderer {
     this._zoomX = 0;
     this._zoomY = 0;
     this._fly = null;
+    this._revealing = 0; // goTo() calls in progress; they have priority over zoom-driven loading
     this._frame = 0;
     this._time = null;
     this._dirty = true;
@@ -290,7 +330,7 @@ export class TreeRenderer {
   }
 
   resetView() {
-    this._fly = null;
+    this._endFly(false);
     this._zoomPending = 0;
     this._vel = { x: 0, y: 0 };
     this.focus = this.root;
@@ -355,14 +395,14 @@ export class TreeRenderer {
   }
 
   /**
-   * Flies the camera so the node (by id) fills the view. Meant for nodes that
-   * are on screen (e.g. one just clicked); a node that is sub-pixel, so that
-   * flying to it would pass through scales where its position isn't
-   * representable, is jumped to exactly instead.
+   * Flies the camera so the node (by id) fills the view, from any distance: the
+   * node may be on screen, or a speck 1e30 times smaller than the screen. Returns
+   * false for an unknown id. Await `renderer._fly?.done` (as goTo does) to know when it lands.
    */
   zoomTo(id) {
     const n = this._byId.get(id);
     if (!n) return false;
+    this._endFly(false);
     const from = this._screenTransform(n);
     const k = Math.min(this.width / (BOX.x1 - BOX.x0 + 0.5), this.height / (2 * BOX.y + 0.3));
     const to = { k, x: this.width / 2 - (k * (BOX.x0 + BOX.x1)) / 2, y: this.height / 2 };
@@ -370,24 +410,85 @@ export class TreeRenderer {
     this._vel = { x: 0, y: 0 };
     this._zoomPending = 0;
     this._dirty = true;
-    if (!(from.k >= 1) || rho > FLY_MAX_RATIO) {
-      this._fly = null;
-      this.focus = n;
+    if (!(from.k > 0) || !Number.isFinite(rho)) {
+      this.focus = n; // not representable: jump
       this.view = to;
-      this._normalize();
       return true;
     }
-    const fly = { node: n, from, to, rho, t0: null, dur: 0 };
-    fly.dur = this.reducedMotion ? 1 : clamp(500 + 220 * Math.abs(Math.log(rho)), 600, 1800);
+    const fly = { node: n, from, to, rho, t0: null, dur: 0, dx: undefined, dy: 0, resolve: null, done: null };
+    fly.done = new Promise((resolve) => { fly.resolve = resolve; });
+    // Roughly constant speed in log-zoom: ~0.13s per e-fold, so 1e15x takes the 7s cap.
+    fly.dur = this.reducedMotion ? 1 : clamp(700 + 130 * Math.abs(Math.log(rho)), 700, 7000);
     if (Math.abs(rho - 1) > 1e-6) {
       // Zooming exponentially about a fixed point flies in a straight line at constant speed:
-      // x(t) = from.x + dx * (rho^e - 1). dx is computed directly, not as a difference of
-      // the fixed point and `from`, which would cancel catastrophically at large rho.
+      // x(t) = from.x + dx * (rho^e - 1). dx is computed directly rather than as `from` minus the
+      // fixed point (which cancels catastrophically at large rho). Every error in `from` is then
+      // an absolute ~1e-13 px, however small the target, and the last frame is set exactly.
       fly.dx = (from.x - to.x) / (1 - rho);
       fly.dy = (from.y - to.y) / (1 - rho);
     }
     this._fly = fly;
     return true;
+  }
+
+  /**
+   * Reveals a node deep in the tree and flies to it. `path` is root-first node ids,
+   * each a child of the one before (what OtolClient.getLineage returns). Every level
+   * that isn't loaded yet is fetched (a few in parallel, since the whole path is
+   * known up front), attached in order, and the target is selected.
+   * Whatever was selected is deselected straight away; the target's details are
+   * reported through onSelect when the flight ends.
+   * Resolves true once the camera arrives, false if the user takes over first.
+   * Rejects if a level can't be loaded, or with the signal's reason if it aborts.
+   * @param {string[]} path
+   * @param {{signal?: AbortSignal, onFlightStart?: () => void, as?: {name:string, rank?:string, ottId?:number}|null}} [options]
+   *   onFlightStart fires once every level is loaded, as the camera sets off. `as` is what the
+   *   target stands for if it is an unnamed MRCA node (OtolClient.getLineage's `alias`).
+   */
+  async goTo(path, { signal, onFlightStart, as = null } = {}) {
+    if (!this.root || path.length === 0 || path[0] !== this.root.data.id) {
+      throw new Error('goTo: the path must start at the root node');
+    }
+    this.selected = null;
+    this.onSelect?.(null); // don't leave the previous node's details up while we travel
+    const missing = path.slice(0, -1).filter((id) => !this._byId.get(id)?.expanded);
+    const fetched = new Map();
+    this._revealing++;
+    try {
+      await mapLimit(missing, REVEAL_CONCURRENCY, signal, async (id) => {
+        fetched.set(id, await this.client.getChildren(id, { signal }));
+      });
+      signal?.throwIfAborted();
+    } finally {
+      this._revealing--;
+    }
+
+    for (let i = 0; i < path.length - 1; i++) {
+      const parent = this._byId.get(path[i]);
+      if (!parent) throw new Error(`goTo: ${path[i]} is not in the tree`);
+      if (!parent.expanded) {
+        this._abort(parent); // the zoom-driven loader may be mid-request on it; goTo has the data
+        this._attachChildren(parent, fetched.get(path[i]));
+      }
+      const next = this._byId.get(path[i + 1]);
+      if (!next) throw new Error(`goTo: ${path[i + 1]} is not a child of ${path[i]}`);
+      next.grow = 1; // path nodes appear in place: the camera is about to fly through them
+    }
+
+    const target = this._byId.get(path.at(-1));
+    if (as && !target.data.named) target.adopt(as);
+    this.selected = target; // ringed as soon as it comes into view
+    onFlightStart?.();
+    this.zoomTo(target.data.id);
+    const arrived = this._fly ? await this._fly.done : true;
+    if (this.selected === target) this.onSelect?.(this.describe(target)); // not if a newer search took over
+    return arrived;
+  }
+
+  _endFly(arrived) {
+    const fly = this._fly;
+    this._fly = null;
+    fly?.resolve?.(arrived);
   }
 
   _fitRoot() {
@@ -432,7 +533,7 @@ export class TreeRenderer {
    * once that child is large. Never changes what is on screen.
    */
   _normalize() {
-    for (let guard = 0; guard < 32; guard++) {
+    for (let guard = 0; guard < 256; guard++) { // a flight to a deep node re-bases ~70 levels in one go
       const f = this.focus;
       const v = this.view;
       if (f.parent && v.k < ASCEND_PX && f.grow >= 1) {
@@ -545,7 +646,7 @@ export class TreeRenderer {
     }
     this.focus = fl.node;
     this.view = { x: v.x, y: v.y, k: v.k };
-    if (t >= 1) this._fly = null;
+    if (t >= 1) this._endFly(true);
   }
 
   // --- traversal -----------------------------------------------------------
@@ -636,7 +737,7 @@ export class TreeRenderer {
       }
     }
     const free = MAX_INFLIGHT - this._loading.size;
-    if (free <= 0) return;
+    if (free <= 0 || this._fly || this._revealing) return; // search has priority; no load storm while flying past branches
     f.candidates
       .filter((n) => now >= n.retryAt)
       .sort((a, b) => b.sk - a.sk)
@@ -937,7 +1038,7 @@ export class TreeRenderer {
   }
 
   _queueZoom(logFactor, x, y) {
-    this._fly = null;
+    this._endFly(false);
     this._zoomPending = clamp(this._zoomPending + logFactor, -8, 8);
     this._zoomX = x;
     this._zoomY = y;
@@ -961,7 +1062,7 @@ export class TreeRenderer {
     }
     const p = this._point(e);
     this._ptrs.set(e.pointerId, p);
-    this._fly = null;
+    this._endFly(false);
     this._vel = { x: 0, y: 0 };
     if (this._ptrs.size === 1) {
       this._drag = { x0: p.x, y0: p.y, moved: false, lastT: e.timeStamp };
@@ -1032,7 +1133,10 @@ export class TreeRenderer {
   _key(e) {
     const c = { x: this.width / 2, y: this.height / 2 };
     const pan = { ArrowLeft: [60, 0], ArrowRight: [-60, 0], ArrowUp: [0, 60], ArrowDown: [0, -60] }[e.key];
-    if (pan) this.panBy(...pan);
+    if (pan) {
+      this._endFly(false);
+      this.panBy(...pan);
+    }
     else if (e.key === '+' || e.key === '=') this._queueZoom(Math.log(1.6), c.x, c.y);
     else if (e.key === '-' || e.key === '_') this._queueZoom(-Math.log(1.6), c.x, c.y);
     else if (e.key === '0') this.resetView();

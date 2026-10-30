@@ -10,12 +10,15 @@ npm run example  # live walkthrough of the API client in the terminal
 ```
 
 Drag to pan, scroll or pinch to zoom (arrow keys and +/- also work, `0` resets), hover for a tooltip
-and click a node for its details. Branches load as you zoom into them.
+and click a node for its details. Branches load as you zoom into them. Press `/` (or click the box
+at the top) to search: pick a species or group and the tree opens every level down to it and the
+camera flies there.
 
 | File                      | What it is                                                       |
 | ------------------------- | ---------------------------------------------------------------- |
 | `index.html`              | page, detail overlay, tooltip, status line                       |
 | `src/canvas-renderer.js`  | `TreeRenderer`: layout, camera, zoom-driven loading, drawing     |
+| `src/search-box.js`       | `SearchBox`: debounced autocomplete combobox for the search field |
 | `src/otol-client.js`      | `OtolClient`: cached, retrying API client (below)                |
 
 ## Renderer
@@ -31,7 +34,8 @@ const renderer = new TreeRenderer(canvas, {
   onStatus: ({ loading, nodes, focus }) => {},
 });
 await renderer.start();            // rejects if the root can't be loaded; safe to call again
-renderer.zoomTo(info.id);          // fly to a node on screen
+renderer.zoomTo(info.id);          // fly to a node you already have
+renderer.goTo(lineage.path, { signal, as: lineage.alias });  // reveal a path, fly to its end (see Search)
 renderer.resetView();
 ```
 
@@ -60,6 +64,26 @@ first, skipping any that would overlap. Unnamed MRCA clades are drawn hollow, da
 with smaller italic labels. A dot you zoom into stays readable rather than swelling over the screen.
 
 Tuning constants (`EXPAND_PX`, `HAIR_PX`, `LABEL_*`, ...) are at the top of the file.
+
+### Search
+
+Typing queries OToL's `tnrs/autocomplete_name` (debounced; a newer query aborts the older one and
+late answers are dropped). Choosing a result calls `client.getLineage(ottId, { nearestAncestor: true })`
+for the root-to-target path, then `renderer.goTo(path)`:
+
+1. every level of the path that isn't loaded is fetched, up to 6 at a time (the whole path is known up
+   front, so a 70-level species takes a handful of round trips rather than 70), then attached in order;
+   the lazy loader stands down meanwhile, and during the flight, so the search has the connections;
+2. the camera flies in a straight line at constant zoom speed, from the whole tree to the node. The
+   same focus re-basing that makes manual zoom precise carries it through, whether the target is 10x or
+   10^30x smaller than the screen; the last frame is set exactly;
+3. the target is ringed and its details open on arrival. Grabbing the canvas, scrolling, or starting
+   another search takes over from a flight in progress.
+
+Two quirks of the synthetic tree are handled: hybrids, environmental samples and paraphyletic groups
+(Reptilia, Protista) were *pruned* from it, so the search flies to the closest ancestor that is in the
+tree and says so; and many ordinary taxa (*Escherichia coli*, *Canis*, *Quercus*) have no node of their
+own but are an unnamed MRCA node, which then takes the taxon's name and rank (`alias`).
 
 ## API client
 
@@ -97,6 +121,9 @@ child has an exact count; that costs 3–6x the payload on wide nodes.
 - `getTreeInfo()` – synth release id, taxonomy version, root id
 - `getRoot()` – root node with children
 - `getNode(id)` / `getChildren(id)` – `id` may be `'ott123'`, `'mrcaott1ott2'` or `123`
+- `autocomplete(text, { limit })` – `[{ ottId, name, isHigher, isSuppressed }]`; under 2 characters is `[]`
+- `getLineage(id, { nearestAncestor })` – `{ target, lineage, path, exact, requested, alias }`: `path` is root-first
+  node ids, each a child of the one before
 - `clearCache()`
 
 Every method accepts `{ signal }` to cancel; aborting one caller never cancels a request other
