@@ -71,6 +71,7 @@ const MAGNET_NEAR_PX = 50; // a node this close to the cursor: zoom exactly abou
 const MAGNET_FAR_PX = 140; // no node this close: zoom about the nearest node instead (blended in between)
 const ANCHOR_TAU_MS = 90; // the zoom centre eases between targets, so changing nearest node doesn't jerk
 const MIN_VISIBLE_NODES = 2; // a zoom-in step is cut short rather than leave fewer nodes than this on screen
+const VISIBLE_MARGIN_PX = 40; // ...and a node only counts if it is this far in from every edge (not half cut off)
 const LIMIT_HINT_EVERY_MS = 4000;
 const LOST_AFTER_MS = 500; // nothing on screen for this long: tell the page, so it can offer a way back
 
@@ -308,6 +309,7 @@ export class TreeRenderer {
     this._zoomY = 0;
     this._fly = null;
     this._revealing = 0; // goTo() calls in progress; they have priority over zoom-driven loading
+    this._hair = []; // last frame's tips of subtrees too small to draw as nodes
     this._anchor = null; // eased zoom centre during a wheel zoom
     this._limitNotedAt = -Infinity;
     this._blankSince = null;
@@ -648,6 +650,7 @@ export class TreeRenderer {
     };
     this._visitFromAnchor(f);
     this._dots = f.dots;
+    this._hair = f.hair;
     this._watchForLost(f, now);
     this._refreshHover();
     this._paint(f);
@@ -661,7 +664,9 @@ export class TreeRenderer {
   /** Tells the page when nothing has been on screen for a while (e.g. the tree was dragged away). */
   _watchForLost(f, now) {
     const { width: W, height: H } = this;
-    const any = f.dots.some((n) => n.sx >= -n.sr && n.sx <= W + n.sr && n.sy >= -n.sr && n.sy <= H + n.sr);
+    const any =
+      f.dots.some((n) => n.sx >= -n.sr && n.sx <= W + n.sr && n.sy >= -n.sr && n.sy <= H + n.sr) ||
+      this._contentPoints().length > 0; // a fan of tips still too small to be nodes is not an empty screen
     if (any) {
       this._blankSince = null;
       if (this._lost) {
@@ -719,6 +724,31 @@ export class TreeRenderer {
   }
 
   /**
+   * Everything on screen worth zooming towards, as {x, y, r, w}: the drawn nodes, and the tips of
+   * subtrees still too small to draw (a fan of 150 hairlines is content you are about to see grow,
+   * not an empty screen). `w` is how many nodes it stands for: a branch whose children are being
+   * fetched, or are about to be (it is big enough), counts double, because on a slow connection
+   * they are not here yet and zooming into the dot must not be refused while they come.
+   */
+  _contentPoints() {
+    const { width: W, height: H } = this;
+    const out = [];
+    for (const n of this._dots) {
+      if (n.sx >= 0 && n.sx <= W && n.sy >= 0 && n.sy <= H) {
+        out.push({ x: n.sx, y: n.sy, r: n.sr, w: n.loading || (n.data.hasChildren && !n.expanded && n.sk >= EXPAND_PX) ? 2 : 1 });
+      }
+    }
+    for (const { xy } of this._hair) {
+      for (let i = 0; i < xy.length; i += 4) {
+        const x = xy[i + 2];
+        const y = xy[i + 3];
+        if (x >= 0 && x <= W && y >= 0 && y <= H) out.push({ x, y, r: 0, w: 1 });
+      }
+    }
+    return out;
+  }
+
+  /**
    * Decides where a zoom-in step is centred, and how far it may go.
    *
    * Centre: the cursor, unless no node is near it, in which case the nearest node (so something
@@ -729,21 +759,21 @@ export class TreeRenderer {
    */
   _contentAwareZoom(cx, cy, dt, step) {
     const { width: W, height: H } = this;
-    const nodes = this._dots.filter((n) => n.sx >= 0 && n.sx <= W && n.sy >= 0 && n.sy <= H);
+    const nodes = this._contentPoints();
 
     let x = cx;
     let y = cy;
     let near = null;
     let nearDist = Infinity;
     for (const n of nodes) {
-      const d = Math.max(0, Math.hypot(n.sx - cx, n.sy - cy) - n.sr);
+      const d = Math.max(0, Math.hypot(n.x - cx, n.y - cy) - n.r);
       if (d < nearDist) [near, nearDist] = [n, d];
     }
     if (near) {
       const t = clamp((nearDist - MAGNET_NEAR_PX) / (MAGNET_FAR_PX - MAGNET_NEAR_PX), 0, 1);
       const w = t * t * (3 - 2 * t);
-      x += (near.sx - cx) * w;
-      y += (near.sy - cy) * w;
+      x += (near.x - cx) * w;
+      y += (near.y - cy) * w;
     }
     if (this._anchor) {
       const a = this.reducedMotion ? 1 : 1 - Math.exp(-dt / ANCHOR_TAU_MS);
@@ -752,18 +782,20 @@ export class TreeRenderer {
     }
     this._anchor = { x, y };
 
-    // Magnifying about (x, y) pushes every node straight away from it. A node leaves the screen at
-    // the factor where its ray from (x, y) crosses the edge, and (the screen being convex) never returns.
+    // Magnifying about (x, y) pushes every node straight away from it. A node leaves the (inset)
+    // screen at the factor where its ray from (x, y) crosses the edge, and (the screen being
+    // convex) never returns. Landing exactly on the edge is not "visible": rounding would decide.
+    const m = VISIBLE_MARGIN_PX;
     const leaves = [];
     for (const n of nodes) {
-      const dx = n.sx - x;
-      const dy = n.sy - y;
+      const dx = n.x - x;
+      const dy = n.y - y;
       let f = Infinity;
-      if (dx > 0) f = Math.min(f, (W - x) / dx);
-      else if (dx < 0) f = Math.min(f, -x / dx);
-      if (dy > 0) f = Math.min(f, (H - y) / dy);
-      else if (dy < 0) f = Math.min(f, -y / dy);
-      if (f >= 1) leaves.push(f);
+      if (dx > 0) f = Math.min(f, (W - m - x) / dx);
+      else if (dx < 0) f = Math.min(f, (m - x) / dx);
+      if (dy > 0) f = Math.min(f, (H - m - y) / dy);
+      else if (dy < 0) f = Math.min(f, (m - y) / dy);
+      if (f >= 1) for (let i = 0; i < n.w; i++) leaves.push(f);
     }
     leaves.sort((a, b) => b - a);
     const room = leaves.length >= MIN_VISIBLE_NODES ? leaves[MIN_VISIBLE_NODES - 1] : 1;

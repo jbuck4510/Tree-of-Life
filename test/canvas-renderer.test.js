@@ -294,6 +294,12 @@ test('zoomTo flies to an on-screen node along a smooth, monotonic path', async (
 
 // --- zooming in must never run out of tree ---------------------------------
 
+// Branches that are never loaded would count as "children on their way"; these tests are about empty space.
+const leafRoot = () => ({
+  ...data('ott1', 1_000_000, true),
+  children: [data('big', 1_000_000), data('tinyA', 1), data('tinyB', 1)],
+});
+
 const onScreen = (r) => r._dots.filter((d) => d.sx >= 0 && d.sx <= W && d.sy >= 0 && d.sy <= H);
 
 /** Wheel-zooms in by `efolds` at (x, y), ticking a 60fps clock until the zoom has settled; returns per-frame stats. */
@@ -308,7 +314,7 @@ function wheelIn(r, efolds, x, y, { frames = 400, t0 = 1000 } = {}) {
 }
 
 test('zooming in on empty space never leaves the screen empty (it used to run to k=5e7 with nothing on screen)', async () => {
-  const { r } = await makeRenderer(bigRoot());
+  const { r } = await makeRenderer(leafRoot());
   settle(r);
   r.tick(0);
   assert.ok(onScreen(r).length >= 2, 'the starting view has nodes');
@@ -318,8 +324,18 @@ test('zooming in on empty space never leaves the screen empty (it used to run to
   assert.ok(Math.max(...trace.map((s) => s.k)) < 1e5, 'and it stopped well short of the zoom limit');
 });
 
+test('when a zoom stops, two nodes are still comfortably in view, not balanced on the screen edge', async () => {
+  const { r } = await makeRenderer(leafRoot());
+  settle(r);
+  r.tick(0);
+  wheelIn(r, 8, 900, 650);
+  r.tick(30_000); // a few more frames: nothing may creep out afterwards either
+  const clear = r._dots.filter((d) => d.sx >= 30 && d.sx <= W - 30 && d.sy >= 30 && d.sy <= H - 30);
+  assert.ok(clear.length >= 2, `${clear.length} nodes are at least 30px inside the screen`);
+});
+
 test('zooming in right on a node (cursor a hair off it) keeps that node near the cursor', async () => {
-  const { r } = await makeRenderer(bigRoot());
+  const { r } = await makeRenderer(leafRoot());
   settle(r);
   r.tick(0);
   const big = r.root.children[0];
@@ -331,8 +347,48 @@ test('zooming in right on a node (cursor a hair off it) keeps that node near the
   assert.ok(big.sx > 0 && big.sx < W && d < 200, `the node ends ${d.toFixed(0)}px from the cursor`);
 });
 
-test('a cursor close to a node zooms exactly about the cursor: no pulling', async () => {
+test('a fan of children too small to draw still counts as content: you can zoom into it', async () => {
   const { r } = await makeRenderer(bigRoot());
+  settle(r);
+  r.tick(0);
+  const big = r.root.children[0];
+  const kids = Array.from({ length: 400 }, (_, i) => data(`t${i}`, 1, false)); // each far under 3px here: hairlines
+  r._attachChildren(big, kids);
+  settle(r);
+  r.tick(16);
+  assert.equal(onScreen(r).filter((d) => /^t\d+$/.test(d.data.id)).length, 0, 'none of them is drawn as a node yet');
+  const z0 = r._rootLogK();
+  const trace = wheelIn(r, 3, big.sx, big.sy, { t0: 100 });
+  const gained = Math.exp(r._rootLogK() - z0);
+  // Measured: 2.0x when only drawn nodes counted (a node with only hairline children looks like a
+  // single node), 4.3x now. The limit left is geometric: zooming about the dot pushes the fan's tips
+  // off the right edge, and going further takes a drag or aiming at a child.
+  assert.ok(gained > 3, `zoomed in ${gained.toFixed(1)}x`);
+  assert.ok(trace.every((s) => s.n >= 1), 'and the screen was never empty');
+});
+
+test('a branch whose children are still loading counts as having content coming, so zooming is not refused', async () => {
+  const { r } = await makeRenderer(leafRoot());
+  settle(r);
+  r.tick(0);
+  const node = (extra) => ({ sx: 400, sy: 300, sr: 6, sk: 300, data: { hasChildren: true }, expanded: false, loading: true, ...extra });
+  r._hair = [];
+  // alone on screen, children not here yet (slow network): the zoom must be allowed so they can load and show
+  r._dots = [node()];
+  let g = r._contentAwareZoom(400, 300, 16, 0.5);
+  assert.equal(g.stopped, false, 'allowed while its children load');
+  assert.equal(g.step, 0.5);
+  // the same node once its children have loaded and none is in view: nothing more to see, so it stops
+  r._dots = [node({ expanded: true, loading: false })];
+  g = r._contentAwareZoom(400, 300, 16, 0.5);
+  assert.equal(g.stopped, true, 'refused once there is truly nothing else in view');
+  // a leaf has no children coming
+  r._dots = [node({ data: { hasChildren: false }, loading: false })];
+  assert.equal(r._contentAwareZoom(400, 300, 16, 0.5).stopped, true);
+});
+
+test('a cursor close to a node zooms exactly about the cursor: no pulling', async () => {
+  const { r } = await makeRenderer(leafRoot());
   settle(r);
   r.tick(0);
   const big = r.root.children[0];
@@ -347,7 +403,7 @@ test('a cursor close to a node zooms exactly about the cursor: no pulling', asyn
 
 test('when the view cannot go closer the zoom stops, and the page is told', async () => {
   let limited = 0;
-  const { r } = await makeRenderer(bigRoot(), { onLimit: () => limited++ });
+  const { r } = await makeRenderer(leafRoot(), { onLimit: () => limited++ });
   settle(r);
   r.tick(0);
   const trace = wheelIn(r, 8, 900, 650);
@@ -360,7 +416,7 @@ test('when the view cannot go closer the zoom stops, and the page is told', asyn
 });
 
 test('with nothing on screen you cannot zoom further in, but you can zoom out', async () => {
-  const { r } = await makeRenderer(bigRoot());
+  const { r } = await makeRenderer(leafRoot());
   settle(r);
   r.tick(0);
   r.panBy(-9000, 0);
@@ -375,7 +431,7 @@ test('with nothing on screen you cannot zoom further in, but you can zoom out', 
 
 test('onLost fires after the tree has been off screen for half a second, and clears when it is back', async () => {
   const lost = [];
-  const { r } = await makeRenderer(bigRoot(), { onLost: (v) => lost.push(v) });
+  const { r } = await makeRenderer(leafRoot(), { onLost: (v) => lost.push(v) });
   settle(r);
   r.tick(0);
   r.panBy(-9000, 0);

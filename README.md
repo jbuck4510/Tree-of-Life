@@ -74,8 +74,10 @@ node away from it exponentially, so zooming on a gap, or even on a node you're o
 in a blank screen. Wheel and key zooming is therefore content-aware: the zoom centres on the cursor
 when a node is within 50px of it, and on the nearest node when none is within 140px (blended between,
 and eased so changing nearest node doesn't jerk). A zoom-in step is cut short rather than leave fewer
-than two nodes on screen, since beyond that you are only zooming into nothing; `onLimit` tells the
-page so it can say why. Zooming out is never restricted. If the tree does end up out of view (say it
+than two nodes comfortably in view (40px in from the edges), since beyond that you are only zooming
+into nothing; `onLimit` tells the page so it can say why. What counts as a node includes the tips of
+a fan too small to draw yet, and a branch whose children are loading counts double (zooming is what
+brings them, and on a slow connection they aren't here yet). Zooming out is never restricted. If the tree does end up out of view (say it
 was dragged away), `onLost(true)` fires after half a second and the page offers "Show the tree".
 Pinch is direct manipulation and is left exact.
 
