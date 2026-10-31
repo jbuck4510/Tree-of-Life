@@ -65,6 +65,15 @@ const K_MAX = 5e7;
 const REVEAL_CONCURRENCY = 6; // levels of a path fetched at once by goTo()
 const MIN_ROOT_ZOOM = 0.5; // can't zoom out past half of the fitted root
 
+// Zooming in is content-aware, because a tree is mostly empty space: magnify about a bare cursor
+// point and every node slides away from it exponentially, leaving a blank screen.
+const MAGNET_NEAR_PX = 50; // a node this close to the cursor: zoom exactly about the cursor
+const MAGNET_FAR_PX = 140; // no node this close: zoom about the nearest node instead (blended in between)
+const ANCHOR_TAU_MS = 90; // the zoom centre eases between targets, so changing nearest node doesn't jerk
+const MIN_VISIBLE_NODES = 2; // a zoom-in step is cut short rather than leave fewer nodes than this on screen
+const LIMIT_HINT_EVERY_MS = 4000;
+const LOST_AFTER_MS = 500; // nothing on screen for this long: tell the page, so it can offer a way back
+
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 /** Keeps a dot readable as you zoom into it, instead of swelling until it fills the screen. */
@@ -267,6 +276,8 @@ export class TreeRenderer {
     this.onSelect = options.onSelect;
     this.onHover = options.onHover;
     this.onStatus = options.onStatus;
+    this.onLimit = options.onLimit; // a zoom-in was stopped: "that's as close as this view goes"
+    this.onLost = options.onLost; // (true|false) nothing is on screen / the tree is back
     this._requestFrame = options.requestFrame ?? ((fn) => globalThis.requestAnimationFrame(fn));
     this._cancelFrame = options.cancelFrame ?? ((id) => globalThis.cancelAnimationFrame(id));
     this.reducedMotion = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
@@ -297,6 +308,10 @@ export class TreeRenderer {
     this._zoomY = 0;
     this._fly = null;
     this._revealing = 0; // goTo() calls in progress; they have priority over zoom-driven loading
+    this._anchor = null; // eased zoom centre during a wheel zoom
+    this._limitNotedAt = -Infinity;
+    this._blankSince = null;
+    this._lost = false;
     this._frame = 0;
     this._time = null;
     this._dirty = true;
@@ -633,6 +648,7 @@ export class TreeRenderer {
     };
     this._visitFromAnchor(f);
     this._dots = f.dots;
+    this._watchForLost(f, now);
     this._refreshHover();
     this._paint(f);
     this._manageRequests(f, now);
@@ -642,6 +658,27 @@ export class TreeRenderer {
     if (active) this._dirty = true;
   }
 
+  /** Tells the page when nothing has been on screen for a while (e.g. the tree was dragged away). */
+  _watchForLost(f, now) {
+    const { width: W, height: H } = this;
+    const any = f.dots.some((n) => n.sx >= -n.sr && n.sx <= W + n.sr && n.sy >= -n.sr && n.sy <= H + n.sr);
+    if (any) {
+      this._blankSince = null;
+      if (this._lost) {
+        this._lost = false;
+        this.onLost?.(false);
+      }
+      return;
+    }
+    this._blankSince ??= now;
+    if (!this._lost && now - this._blankSince >= LOST_AFTER_MS) {
+      this._lost = true;
+      this.onLost?.(true);
+    } else if (!this._lost) {
+      f.active = true; // keep frames coming until the timer can run out
+    }
+  }
+
   _stepCamera(dt, now) {
     if (this._fly) {
       this._stepFly(now);
@@ -649,12 +686,26 @@ export class TreeRenderer {
     }
     let active = false;
     if (Math.abs(this._zoomPending) > 1e-3) {
-      const step = this._zoomPending * (this.reducedMotion ? 1 : 1 - Math.exp(-dt / ZOOM_TAU_MS));
-      const applied = this.zoomAt(this._zoomX, this._zoomY, Math.exp(step));
-      this._zoomPending = Math.abs(Math.log(applied) - step) > 1e-9 ? 0 : this._zoomPending - step;
+      let step = this._zoomPending * (this.reducedMotion ? 1 : 1 - Math.exp(-dt / ZOOM_TAU_MS));
+      let [cx, cy] = [this._zoomX, this._zoomY];
+      let stopped = false;
+      if (step > 0) {
+        const g = this._contentAwareZoom(cx, cy, dt, step);
+        [cx, cy, step, stopped] = [g.x, g.y, g.step, g.stopped];
+      } else {
+        this._anchor = null; // zooming out about the cursor is always fine
+      }
+      const applied = this.zoomAt(cx, cy, Math.exp(step));
+      const clamped = Math.abs(Math.log(applied) - step) > 1e-9;
+      this._zoomPending = clamped || stopped ? 0 : this._zoomPending - step;
+      if (stopped && now - this._limitNotedAt > LIMIT_HINT_EVERY_MS) {
+        this._limitNotedAt = now;
+        this.onLimit?.();
+      }
       active = true;
     } else {
       this._zoomPending = 0;
+      this._anchor = null;
     }
     const speed = Math.hypot(this._vel.x, this._vel.y);
     if (speed > 0.01) {
@@ -665,6 +716,59 @@ export class TreeRenderer {
       active = true;
     }
     return active;
+  }
+
+  /**
+   * Decides where a zoom-in step is centred, and how far it may go.
+   *
+   * Centre: the cursor, unless no node is near it, in which case the nearest node (so something
+   * stays under your pointer instead of drifting off). Limit: the step is cut short rather than
+   * leave fewer than MIN_VISIBLE_NODES nodes on screen, because past that point you are only
+   * zooming into empty space. Uses the previous frame's visible nodes.
+   * @returns {{x:number, y:number, step:number, stopped:boolean}}
+   */
+  _contentAwareZoom(cx, cy, dt, step) {
+    const { width: W, height: H } = this;
+    const nodes = this._dots.filter((n) => n.sx >= 0 && n.sx <= W && n.sy >= 0 && n.sy <= H);
+
+    let x = cx;
+    let y = cy;
+    let near = null;
+    let nearDist = Infinity;
+    for (const n of nodes) {
+      const d = Math.max(0, Math.hypot(n.sx - cx, n.sy - cy) - n.sr);
+      if (d < nearDist) [near, nearDist] = [n, d];
+    }
+    if (near) {
+      const t = clamp((nearDist - MAGNET_NEAR_PX) / (MAGNET_FAR_PX - MAGNET_NEAR_PX), 0, 1);
+      const w = t * t * (3 - 2 * t);
+      x += (near.sx - cx) * w;
+      y += (near.sy - cy) * w;
+    }
+    if (this._anchor) {
+      const a = this.reducedMotion ? 1 : 1 - Math.exp(-dt / ANCHOR_TAU_MS);
+      x = this._anchor.x + (x - this._anchor.x) * a;
+      y = this._anchor.y + (y - this._anchor.y) * a;
+    }
+    this._anchor = { x, y };
+
+    // Magnifying about (x, y) pushes every node straight away from it. A node leaves the screen at
+    // the factor where its ray from (x, y) crosses the edge, and (the screen being convex) never returns.
+    const leaves = [];
+    for (const n of nodes) {
+      const dx = n.sx - x;
+      const dy = n.sy - y;
+      let f = Infinity;
+      if (dx > 0) f = Math.min(f, (W - x) / dx);
+      else if (dx < 0) f = Math.min(f, -x / dx);
+      if (dy > 0) f = Math.min(f, (H - y) / dy);
+      else if (dy < 0) f = Math.min(f, -y / dy);
+      if (f >= 1) leaves.push(f);
+    }
+    leaves.sort((a, b) => b - a);
+    const room = leaves.length >= MIN_VISIBLE_NODES ? leaves[MIN_VISIBLE_NODES - 1] : 1;
+    const allowed = Math.log(room);
+    return allowed < step ? { x, y, step: Math.max(0, allowed), stopped: true } : { x, y, step, stopped: false };
   }
 
   _stepFly(now) {

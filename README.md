@@ -69,7 +69,17 @@ node, appear only when 9px or larger, grow sooner for bigger clades, and are pla
 first, skipping any that would overlap. Unnamed MRCA clades are drawn hollow, dashed, fainter and
 with smaller italic labels. A dot you zoom into stays readable rather than swelling over the screen.
 
-Tuning constants (`EXPAND_PX`, `HAIR_PX`, `LABEL_*`, ...) are at the top of the file.
+**Zooming in.** A tree is mostly empty space, and magnifying about a bare cursor point pushes every
+node away from it exponentially, so zooming on a gap, or even on a node you're off by a pixel, ends
+in a blank screen. Wheel and key zooming is therefore content-aware: the zoom centres on the cursor
+when a node is within 50px of it, and on the nearest node when none is within 140px (blended between,
+and eased so changing nearest node doesn't jerk). A zoom-in step is cut short rather than leave fewer
+than two nodes on screen, since beyond that you are only zooming into nothing; `onLimit` tells the
+page so it can say why. Zooming out is never restricted. If the tree does end up out of view (say it
+was dragged away), `onLost(true)` fires after half a second and the page offers "Show the tree".
+Pinch is direct manipulation and is left exact.
+
+Tuning constants (`EXPAND_PX`, `HAIR_PX`, `LABEL_*`, `MAGNET_*`, ...) are at the top of the file.
 
 ### Search
 

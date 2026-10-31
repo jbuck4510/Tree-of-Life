@@ -292,6 +292,105 @@ test('zoomTo flies to an on-screen node along a smooth, monotonic path', async (
   assert.ok(near(end.y, H / 2, 1e-6) && near(end.x, W / 2 - end.k * 0.9, 1e-6), 'ends centred');
 });
 
+// --- zooming in must never run out of tree ---------------------------------
+
+const onScreen = (r) => r._dots.filter((d) => d.sx >= 0 && d.sx <= W && d.sy >= 0 && d.sy <= H);
+
+/** Wheel-zooms in by `efolds` at (x, y), ticking a 60fps clock until the zoom has settled; returns per-frame stats. */
+function wheelIn(r, efolds, x, y, { frames = 400, t0 = 1000 } = {}) {
+  r._queueZoom(efolds, x, y);
+  const trace = [];
+  for (let i = 0; i < frames; i++) {
+    r.tick(t0 + i * 16);
+    trace.push({ n: onScreen(r).length, k: r.view.k });
+  }
+  return trace;
+}
+
+test('zooming in on empty space never leaves the screen empty (it used to run to k=5e7 with nothing on screen)', async () => {
+  const { r } = await makeRenderer(bigRoot());
+  settle(r);
+  r.tick(0);
+  assert.ok(onScreen(r).length >= 2, 'the starting view has nodes');
+  const trace = wheelIn(r, 8, 900, 650); // far from any node
+  const emptiest = Math.min(...trace.map((s) => s.n));
+  assert.ok(emptiest >= 2, `fewest nodes on screen during the zoom: ${emptiest}`);
+  assert.ok(Math.max(...trace.map((s) => s.k)) < 1e5, 'and it stopped well short of the zoom limit');
+});
+
+test('zooming in right on a node (cursor a hair off it) keeps that node near the cursor', async () => {
+  const { r } = await makeRenderer(bigRoot());
+  settle(r);
+  r.tick(0);
+  const big = r.root.children[0];
+  const cx = big.sx + 0.4; // a real hand is never more accurate than this, and zoom magnifies it exponentially
+  const cy = big.sy - 0.3;
+  const trace = wheelIn(r, 6, cx, cy);
+  assert.ok(Math.min(...trace.map((s) => s.n)) >= 2);
+  const d = Math.hypot(big.sx - cx, big.sy - cy);
+  assert.ok(big.sx > 0 && big.sx < W && d < 200, `the node ends ${d.toFixed(0)}px from the cursor`);
+});
+
+test('a cursor close to a node zooms exactly about the cursor: no pulling', async () => {
+  const { r } = await makeRenderer(bigRoot());
+  settle(r);
+  r.tick(0);
+  const big = r.root.children[0];
+  const cx = big.sx + 12;
+  const cy = big.sy + 5;
+  const before = r.screenToWorld(cx, cy);
+  r._queueZoom(0.3, cx, cy);
+  r.tick(2000);
+  const after = r.screenToWorld(cx, cy);
+  assert.ok(r.view.k > 0 && near(before.x, after.x, 1e-9) && near(before.y, after.y, 1e-9), 'the point under the cursor did not move');
+});
+
+test('when the view cannot go closer the zoom stops, and the page is told', async () => {
+  let limited = 0;
+  const { r } = await makeRenderer(bigRoot(), { onLimit: () => limited++ });
+  settle(r);
+  r.tick(0);
+  const trace = wheelIn(r, 8, 900, 650);
+  const k = trace.at(-1).k;
+  assert.ok(limited >= 1, 'onLimit fired');
+  assert.equal(r._zoomPending, 0, 'no zoom left queued, so it is not still ticking');
+  wheelIn(r, 3, 900, 650, { t0: 20_000 });
+  assert.ok(near(r.view.k, k, 1e-6), 'more wheel input at the limit does nothing');
+  assert.ok(limited <= 3, `and does not nag (fired ${limited} times)`);
+});
+
+test('with nothing on screen you cannot zoom further in, but you can zoom out', async () => {
+  const { r } = await makeRenderer(bigRoot());
+  settle(r);
+  r.tick(0);
+  r.panBy(-9000, 0);
+  r.tick(100);
+  assert.equal(onScreen(r).length, 0, 'the tree has been dragged out of view');
+  const k0 = r.view.k;
+  wheelIn(r, 3, 640, 400, { t0: 1000 });
+  assert.ok(near(r.view.k, k0, 1e-9), 'zoom-in is refused');
+  wheelIn(r, -1, 640, 400, { t0: 20_000 });
+  assert.ok(r.view.k < k0 * 0.5, 'zoom-out still works');
+});
+
+test('onLost fires after the tree has been off screen for half a second, and clears when it is back', async () => {
+  const lost = [];
+  const { r } = await makeRenderer(bigRoot(), { onLost: (v) => lost.push(v) });
+  settle(r);
+  r.tick(0);
+  r.panBy(-9000, 0);
+  r.tick(100);
+  r.tick(400);
+  assert.deepEqual(lost, [], 'not yet');
+  r.tick(700);
+  assert.deepEqual(lost, [true]);
+  r.tick(2000);
+  assert.deepEqual(lost, [true], 'once, not every frame');
+  r.panBy(9000, 0);
+  r.tick(2100);
+  assert.deepEqual(lost, [true, false]);
+});
+
 // --- search: goTo ---------------------------------------------------------
 
 /** Chain n0 > n1 > ... > n<depth>; each node also has a small sibling `n<i>x`. Counts concurrency. */

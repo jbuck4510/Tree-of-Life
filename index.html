@@ -104,7 +104,14 @@
     button.primary { background: var(--accent); color: #1b1500; border-color: transparent; font-weight: 600; }
     button.primary:hover { background: #ffdc8a; }
 
-    #tip[hidden], #fatal[hidden] { display: none; }
+    #tip[hidden], #fatal[hidden], #lost[hidden] { display: none; }
+
+    #lost {
+      position: fixed; z-index: 3; left: 16px; bottom: 64px; display: flex; align-items: center; gap: 12px;
+      padding: 6px 6px 6px 16px; border-radius: 999px; font-size: 13px;
+      background: var(--panel); border: 1px solid var(--line); box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+    }
+    #lost button { border-radius: 999px; padding: 5px 14px; }
 
     /* ---- details sidebar (a bottom sheet on phones) ---- */
     :root { --sb-w: 380px; }
@@ -300,6 +307,11 @@
 
   <div id="tip" hidden><b></b><span></span></div>
 
+  <div id="lost" role="status" hidden>
+    <span>There's nothing in view.</span>
+    <button class="primary" id="lost-go" type="button">Show the tree</button>
+  </div>
+
   <div id="fatal" role="alert" hidden>
     <p><b>Couldn't load the Tree of Life.</b></p>
     <p class="err" id="fatal-msg"></p>
@@ -370,6 +382,11 @@
       client,
       onSelect: handleSelect,
       onHover: showTip,
+      onLost: (lost) => { $('lost').hidden = !lost; },
+      onLimit() {
+        // zooming in was stopped because there is nothing further to see here; don't talk over a search in progress
+        if (!note.classList.contains('busy')) say('That’s as close as this view goes. Drag another node into view and zoom on that, or scroll out.', '', 4500);
+      },
       onStatus({ loading, nodes, focus }) {
         $('focus').textContent = focus.name;
         $('loading').hidden = loading === 0;
@@ -382,6 +399,7 @@
     addEventListener('resize', applyInsets);
 
     $('reset').addEventListener('click', () => { flight?.abort(); renderer.resetView(); say(''); });
+    $('lost-go').addEventListener('click', () => { flight?.abort(); renderer.resetView(); $('lost').hidden = true; });
     addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && sidebar.isOpen && document.activeElement?.id !== 'q') sidebar.onClose();
     });
